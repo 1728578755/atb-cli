@@ -1412,10 +1412,13 @@ pub(crate) async fn challenge_value(state: &AppState, req: ChallengeRequest) -> 
     let mut activation_diag: Vec<Value> = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        // 只用 deadline 判终止：每片至少 1ms、最多 3.5s（再留 0.5s 给 CDP 回包），
+        // 只用 deadline 判终止：每片最多 3.5s（再留 0.5s 给 CDP 回包），
         // 剩余时间必然收敛。旧实现写死 `injections >= 80`（= 最多 320s），
         // 把 --timeout 600 静默截断成 320s，而且超时后既不说明原因也不报错。
-        if remaining.is_zero() {
+        //
+        // 余量不足一次往返（< 60ms，低于派发守卫的 50ms）时直接收尾：再派发只会撞上「预算在派发前
+        // 已用尽」的通道错误，把上一片拿到的有效载荷换成一条无信息的错误。
+        if remaining < Duration::from_millis(60) {
             break;
         }
         // 给页面侧留一点余量：`timeoutMs` 用满 4s 时，回包正好撞上 CDP 超时。

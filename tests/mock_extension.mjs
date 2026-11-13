@@ -193,6 +193,28 @@ export function startMockExtension({ waitForReady = true, port = DEFAULT_EXT_POR
         ],
       };
     }
+    if (/__abcDescribe/.test(code)) {
+      // `snapshot --js --details` 的补详情脚本：daemon 一次性下发全部选择器，
+      // 页面内逐个 describe 后回 `{ok, details:{ref: info}}`。
+      const targetsMatch = code.match(/const __abcTargets = (\[[\s\S]*?\]);/);
+      let targets = [];
+      try {
+        targets = targetsMatch ? JSON.parse(targetsMatch[1]) : [];
+      } catch {
+        targets = [];
+      }
+      const details = {};
+      for (const [ref, selector] of targets) {
+        details[ref] = {
+          tag: selector === "#q" ? "input" : "button",
+          text: selector === "#q" ? "" : "Go",
+          selector,
+          rect: selector === "#q" ? { x: 1, y: 30, w: 120, h: 20 } : { x: 1, y: 2, w: 40, h: 20 },
+          visible: true,
+        };
+      }
+      return { ok: true, details };
+    }
     if (/__abcSnapshot\(/.test(code)) {
       return {
         ok: true,
@@ -348,12 +370,11 @@ export function startMockExtension({ waitForReady = true, port = DEFAULT_EXT_POR
       } catch {
         /* 用默认值 */
       }
-      const base = { ok: true, title: "Mock Page", url: tab?.url || "https://mock.local/" };
       // 每个场景的 status 形状决定 daemon 走快路径还是进 wait 循环（src/server.rs 的
       // `!blocking && (token_ready || !interactive)`）：
       //   cleared         → 命中快路径，via='no-challenge'、injections=0、challenge=status payload
       //   widget-cleared  → 卡住快路径（interactive && !token_ready），循环里 wait 不带 via → 兜成 'clear'
-      //   token           → blocking=true 卡住快路径，循环里 wait 带 via='token'
+      //   token           → 已有令牌，status 直接给出 token_ready，快路径返回 via='token'
       //   need-human / timeout → 永不 cleared，直到超时
       const PROFILES = {
         cleared: { detected: false, blocking: false, interactive: false, token: false, vendor: null, kind: "unknown" },
@@ -363,6 +384,14 @@ export function startMockExtension({ waitForReady = true, port = DEFAULT_EXT_POR
         timeout: { detected: true, blocking: true, interactive: true, token: false, vendor: "turnstile", kind: "widget" },
       };
       const profile = PROFILES[scenario] || PROFILES.timeout;
+      const base = {
+        ok: true,
+        detected: profile.detected,
+        blocking: profile.blocking,
+        interactive: profile.interactive,
+        title: "Mock Page",
+        url: tab?.url || "https://mock.local/",
+      };
       const tokenFields = profile.token ? [{ name: "cf-turnstile-response", length: 982 }] : [];
       const action = opts.action === "detect" ? "status" : String(opts.action || "wait");
 
@@ -999,8 +1028,9 @@ function runSelfTest() {
     const snap = await run(["snapshot", "--limit", "10", "--details"]);
     const snapTree = JSON.stringify(snap.json?.result?.tree ?? []);
     assert(snap.json?.ok === true, "snapshot 成功", snap.stdout);
-    assert((snap.json?.result?.pagination?.total_operable ?? 0) >= 1, "至少一个 @e 引用", snap.json?.result?.pagination);
-    assert(/"tag":"BUTTON"/.test(snapTree), "详情已合并进树", snapTree.slice(0, 200));
+    const refCount = (snapTree.match(/"ref":"@e/g) || []).length;
+    assert(refCount >= 1, "至少一个 @e 引用", snap.json?.result);
+    assert(/"tag":"button"/i.test(snapTree), "详情已合并进树", snapTree.slice(0, 200));
     assert(!/dom_error/.test(snapTree), "详情无错误", snapTree.slice(0, 200));
 
     console.log("4) --async 提交后台任务并等待结果");
@@ -1339,7 +1369,7 @@ function runSelfTest() {
     result = await run(["challenge", "solve", "--tab", tabId, "--timeout", "6"]);
     const chSolveToken = result.json?.result || {};
     assert(chSolveToken.passed === true && chSolveToken.via === "token", "拿到令牌时 via=token", chSolveToken);
-    assert(chSolveToken.injections >= 1, "token 场景 blocking=true 卡住快路径，必走循环", chSolveToken.injections);
+    assert(chSolveToken.injections === 0, "已有令牌时直接放行，不再注入页面脚本", chSolveToken.injections);
 
     // 验证码一直没完成：必须 passed=false，且不得出现 passed=true。
     mock.state.challengeScenario = "timeout";
