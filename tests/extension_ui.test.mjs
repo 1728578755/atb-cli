@@ -79,12 +79,46 @@ test('两个入口共用同一批设置键，且都监听 storage 变更', () =>
   const popup = read('popup.js');
   const options = read('options.js');
   const common = read('ui/common.js');
-  for (const key of ['themeMode', 'popupWidthMode', 'uiDensity', 'showBadge', 'clipboardTtlSec']) {
+  for (const key of ['themeMode', 'popupWidthMode', 'uiDensity', 'showBadge', 'clipboardTtlSec',
+    'persistTtlSec']) {
     assert.match(common, new RegExp(`\\b${key}:`), `ui/common.js 的默认设置缺少 ${key}`);
     assert.match(popup + options, new RegExp(key), `popup/options 没有使用设置键 ${key}`);
   }
   assert.match(popup, /onSettingsChanged/, 'popup 必须跟随 storage 变更（否则另一个入口改了设置不生效）');
   assert.match(options, /onSettingsChanged/, 'options 必须跟随 storage 变更');
+});
+
+test('调试注入只保留 persistTtlSec，其余项是 CLI 只读提示', () => {
+  const common = read('ui/common.js');
+  assert.match(common, /persistTtlSec:\s*7200/, 'persistTtlSec 默认应为 7200 秒');
+  assert.doesNotMatch(common, /\bwarnHiddenTab:/, 'warnHiddenTab 没有运行时消费方，不应保留为设置键');
+  assert.doesNotMatch(common, /\bconsoleHistorySettleMs:/, 'consoleHistorySettleMs 没有运行时消费方，不应保留为设置键');
+
+  const popup = read('popup.html');
+  const options = read('options.html');
+  assert.match(popup, /id="persistTtlSec"/, 'popup.html 缺少 persistTtlSec 控件');
+  assert.match(options, /id="persistTtlSelect"/, 'options.html 缺少 persistTtlSec 控件');
+  assert.doesNotMatch(popup + options, /id="warnHiddenTab|id="warnHiddenTabToggle|id="consoleHistorySettleMs|id="consoleSettleSelect/,
+    '已删除的死键不应留下控件');
+
+  for (const [page, html] of [['popup.html', popup], ['options.html', options]]) {
+    assert.match(html, /ATB_HIDDEN_TAB_WARNING=off/, `${page} 缺少后台标签页的 CLI 提示`);
+    assert.match(html, /atb console history --settle-ms 300/, `${page} 缺少 console history 的 CLI 提示`);
+    assert.match(html, /ATB_CONSOLE_HISTORY_SETTLE_MS/, `${page} 缺少 console history 的环境变量提示`);
+  }
+});
+
+test('management 只在 optional_permissions 里，授权由用户点击触发', () => {
+  assert.ok(Array.isArray(manifest.optional_permissions), '缺少 optional_permissions');
+  assert.ok(manifest.optional_permissions.includes('management'), 'management 应是可选权限');
+  assert.ok(!(manifest.permissions || []).includes('management'), 'management 不能放进必需权限');
+  const html = read('options.html');
+  assert.match(html, /id="btnGrantManagement"/, '管理页缺少授权按钮');
+  assert.match(html, /management 权限只用于列出已安装扩展/, '管理页缺少权限边界说明');
+  const js = read('options.js');
+  assert.match(js, /chrome\.permissions\.contains/, '需要读取当前授权状态');
+  assert.match(js, /chrome\.permissions\.request\(\{\s*permissions:\s*\['management'\]/, '授权必须走 permissions.request');
+  assert.doesNotMatch(js, /chrome\.management\.getAll/, '扩展页面不应直接枚举扩展');
 });
 
 test('popup 的「重新连接」走后台 reconnect 命令', () => {
@@ -130,15 +164,15 @@ test('扩展自检读整包指纹，改界面文件也会触发重载', () => {
   assert.match(deploy, /writeBuildStamp\(target/, '部署成功后要落指纹');
 });
 
-test('管理页面收成 1180 居中面板，正文列 860', () => {
+test('管理页面收成 1240 居中面板，正文列 960', () => {
   const css = read('options.css');
   const block = (selector) => {
     const start = css.indexOf(selector);
     assert.ok(start >= 0, '缺少规则 ' + selector);
     return css.slice(start, css.indexOf('}', start));
   };
-  assert.ok(block('.shell {').includes('max-width: 1180px'), '管理页外壳应限宽 1180');
-  assert.ok(block('.content {').includes('max-width: 860px'), '管理页正文列应限宽 860');
+  assert.ok(block('.shell {').includes('max-width: 1240px'), '管理页外壳应限宽 1240');
+  assert.ok(block('.content {').includes('max-width: 960px'), '管理页正文列应限宽 960');
 });
 
 test('浏览器标识默认跨重载稳定，管理页可显式重置', () => {

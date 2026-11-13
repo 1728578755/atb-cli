@@ -1,4 +1,4 @@
-// 关键回归清单。
+// v10 关键回归清单。
 //
 // 报告只给了「应该补什么」，没有给断言。这里挑 5 条最高价值、且能在 Node 下
 // 低成本守卫的路径：能在 JS 侧真跑的就真跑，Rust 侧用「锁定关键代码路径」的
@@ -72,7 +72,7 @@ function fnBody(text, name) {
   return null;
 }
 
-test('wait-js 超时必须在顶层产出 ok:false + wait_js_failed（/1）', () => {
+test('wait-js 超时必须在顶层产出 ok:false + wait_js_failed', () => {
   const exec = stripComments(read('src', 'server', 'exec.rs'));
   // 内层：wait 结果 ok=false 时打标，而不是当作正常结果继续。
   assert.ok(
@@ -91,7 +91,7 @@ test('wait-js 超时必须在顶层产出 ok:false + wait_js_failed（/1）', ()
   );
 });
 
-test('幂等缓存不缓存失败响应（/2）', () => {
+test('幂等缓存不缓存失败响应', () => {
   const state = stripComments(read('src', 'server', 'state.rs'));
   const cacheable = fnBody(state, 'cacheable_response');
   assert.ok(cacheable, '应存在 cacheable_response（缓存准入）');
@@ -102,7 +102,7 @@ test('幂等缓存不缓存失败响应（/2）', () => {
   assert.match(yieldSlot, /cache\.remove\(cache_key\)/, '失败响应应释放占位而不是写缓存');
 });
 
-test('popup 的 cookie 值默认掩码，只有显式展开才显示明文（/3）', () => {
+test('popup 的 cookie 值默认掩码，只有显式展开才显示明文', () => {
   const popup = stripComments(read('assets', 'atb_bridge', 'popup.js'));
   assert.match(popup, /let\s+cookieRevealed\s*=\s*false/, '默认必须是掩码状态');
   assert.match(
@@ -113,7 +113,7 @@ test('popup 的 cookie 值默认掩码，只有显式展开才显示明文（/3�
   assert.match(popup, /cookieRevealed\s*=\s*false/, '重新打开/重置时必须回到掩码');
 });
 
-test('challenge status 载荷不可用时不得当成「没有验证码」（/4）', () => {
+test('challenge status 载荷不可用时不得当成「没有验证码」', () => {
   const challenge = stripComments(read('src', 'server', 'challenge.rs'));
   const usable = fnBody(challenge, 'challenge_status_usable');
   assert.ok(usable, '应存在 challenge_status_usable');
@@ -125,7 +125,7 @@ test('challenge status 载荷不可用时不得当成「没有验证码」（/4�
   assert.match(challenge, /Ok\(status\)\s+if\s+challenge_status_usable\(&status\)/, 'status 分支必须做可用性守卫');
 });
 
-test('WS 断线重连调度写在 finally 里（/5）', () => {
+test('WS 断线重连调度写在 finally 里', () => {
   const background = stripComments(read('assets', 'atb_bridge', 'background.js'));
   // 只截 onclose 赋值附近：避免在整份文件里跨函数匹配。
   const at = background.indexOf('socket.onclose = async');

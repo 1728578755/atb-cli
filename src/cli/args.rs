@@ -72,6 +72,10 @@ pub struct Cli {
 pub(crate) enum CommandKind {
     /// 列出全部标签页（含 browser_id/profile_id/tab_id），确认后续操作目标
     Tabs(TabsArgs),
+    /// 把目标标签页切到前台（后台标签页会节流定时器/懒加载，测试脚本常需要它可见）
+    Focus(FocusArgs),
+    /// 把当前智能体的默认目标固定到指定标签页，后续命令不写 --tab 时用它
+    Use(UseArgs),
     /// 按 browser → profile → 标签页树形展示归属关系
     Tabtree(TabtreeArgs),
     /// 按 tab/browser/profile 反查归属：当前打的是哪个浏览器、哪个 Profile
@@ -116,10 +120,14 @@ pub(crate) enum CommandKind {
     Batch(BatchArgs),
     /// 结构化读页面：标题、正文、表单、计数；要读内容优先用它
     Read(ReadArgs),
+    /// 元素量测：rect / computed style / 可见性；比手写 exec 少一轮试错
+    Measure(MeasureArgs),
     /// 按 CSS / 可见文本 / XPath 找元素，拿 selector 给后续动作
     Find(FindArgs),
-    /// 注入 JS；--persist <name> 命名后每次导航自动重放
+    /// 注入 JS；--persist <name> 命名后每次导航自动重放；--userscript 提供 GM shim
     Inject(InjectArgs),
+    /// 打开用户脚本安装页（Tampermonkey/Violentmonkey），一条命令完成安装入口
+    Userscript(UserscriptArgs),
     /// 列出页面内 iframe，取 frame_id 供 --frame 使用
     Frames(FramesArgs),
     /// 列出已连接的浏览器实例，多浏览器/多 Profile 时用来选目标
@@ -165,6 +173,10 @@ pub(crate) enum CommandKind {
     Scrape(ScrapeArgs),
     /// 健康状态：daemon、扩展连接、可用标签页；退出码即结论
     Status,
+    /// 环境快照：浏览器/Profile/扩展版本/标签页/持久注入/警告，一次拿齐
+    Env(EnvArgs),
+    /// 列出已安装扩展（需在扩展设置页授权 management 权限）
+    Extensions(ExtensionsArgs),
     /// 查看 daemon 日志尾部
     Logs(LogsArgs),
     /// 输出全部命令的机器可读 schema（参数/类型/默认值/error_code），供 Agent 一次拿到用法
@@ -256,6 +268,18 @@ pub(crate) struct TabsArgs {
     /// 旧实现 tabs 混着用户自己开的页面，智能体按列表清理会误伤。
     #[arg(long)]
     pub(crate) mine: bool,
+    /// 只保留 URL 含该子串的标签页（不区分大小写，daemon 侧过滤）
+    #[arg(long = "url-contains", value_name = "SUB")]
+    pub(crate) url_contains: Option<String>,
+    /// 只保留标题含该子串的标签页（不区分大小写，daemon 侧过滤）
+    #[arg(long = "title-contains", value_name = "SUB")]
+    pub(crate) title_contains: Option<String>,
+    /// 与 --url-contains/--title-contains 同义的简短别名
+    #[arg(long, value_name = "SUB")]
+    pub(crate) filter: Option<String>,
+    /// 输出格式：json（默认）| jsonl（一行一个标签页）| tsv（tab_id\t标题\tURL）
+    #[arg(long, default_value = "json", value_parser = ["json", "jsonl", "tsv"])]
+    pub(crate) format: String,
 }
 
 #[derive(Debug, Args)]
@@ -300,12 +324,14 @@ pub(crate) struct ScanArgs {
   atb exec 'return document.querySelectorAll("a").length'
   atb exec --tab all 'return location.href'      # 所有标签页并发
   atb exec --file script.js                      # 从文件读
+  atb exec --file a.js --file b.js               # 按顺序拼接多个文件
   echo 'return 1+1' | atb exec --file -           # 从 stdin 读"#)]
 pub(crate) struct ExecArgs {
     #[arg(default_value = "")]
     pub(crate) script: String,
-    #[arg(long)]
-    pub(crate) file: Option<PathBuf>,
+    /// 脚本文件；可重复，按出现顺序拼接；`-` 读 stdin
+    #[arg(long, value_name = "FILE", action = clap::ArgAction::Append)]
+    pub(crate) file: Vec<PathBuf>,
     #[arg(long)]
     pub(crate) tab: Option<String>,
     #[arg(long)]
@@ -323,11 +349,14 @@ pub(crate) struct ExecArgs {
     #[arg(long, default_value_t = 60.0)]
     pub(crate) timeout: f64,
     /// 返回值上限（字符）。超出时返回截断预览，避免一条命令占满上下文
-    #[arg(long = "max-bytes")]
+    #[arg(long = "max-bytes", visible_alias = "max-chars")]
     pub(crate) max_bytes: Option<usize>,
+    /// 跳过本地 JS 配平检查，交给浏览器实际执行（误报时的逃生口）
+    #[arg(long = "no-preflight")]
+    pub(crate) no_preflight: bool,
     /// 执行环境：main（默认）或 isolated（不受页面 CSP 影响，但看不到页面变量）
     ///
-    /// 以前是自由字符串，`--world isolated`（小写）在扩展侧落成 MAIN，
+    // v11：以前是自由字符串，`--world isolated`（小写）在扩展侧落成 MAIN，
     /// 用户以为绕过了 CSP、其实没有。现在解析期只接受这两个值（大小写不敏感），
     /// 其它值直接 exit 2；下发前统一大写，与扩展的消息契约一致。
     #[arg(
@@ -528,6 +557,18 @@ pub(crate) struct ScreenshotArgs {
     /// 超出部分截断并在结果里回 `truncated:true`。
     #[arg(long)]
     pub(crate) max_height: Option<u32>,
+    /// 截图前额外等待（毫秒）；默认取 ATB_SCREENSHOT_SETTLE_MS（0 表示不额外等）
+    #[arg(long = "settle-ms")]
+    pub(crate) settle_ms: Option<u64>,
+    /// 截图前先等到该元素出现；`host >>> inner` 支持 shadow DOM
+    #[arg(long = "wait-selector")]
+    pub(crate) wait_selector: Option<String>,
+    /// 截图前等到页面在途请求归零并静默（默认 500ms，可写成 --network-idle 800）
+    #[arg(long = "network-idle", num_args = 0..=1, default_missing_value = "0")]
+    pub(crate) network_idle: Option<u64>,
+    /// CDP 不可用时直接失败，不再静默回落 captureVisibleTab
+    #[arg(long = "require-cdp")]
+    pub(crate) require_cdp: bool,
     #[arg(long, default_value_t = 30.0)]
     pub(crate) timeout: f64,
 }

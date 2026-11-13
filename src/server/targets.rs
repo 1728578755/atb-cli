@@ -145,7 +145,7 @@ fn owned_by_agent(owned: &Option<HashSet<String>>, tab: &TabInfo) -> bool {
 /// 这里是所有多目标命令的唯一入口：解析失败会给出候选标签页，
 /// 成功则在执行任何页面操作之前就把目标固定下来（不会出现「执行了一半才发现目标不存在」）。
 ///
-/// `agent_scope`：`All` / `Ids` 是否按 `current_agent` 的 `agent_opened` 过滤。
+// `agent_scope`：`All` / `Ids` 是否按 `current_agent()` 的 `agent_opened` 过滤。
 /// 默认 `true`（`/multi` 不给 scope 时由 `ATB_MULTI_SCOPE` 决定，默认 `agent`）。
 pub(crate) async fn resolve_targets(
     state: &AppState,
@@ -200,7 +200,7 @@ pub(crate) async fn resolve_targets(
     }
 
     let mut resolved: Vec<ResolvedTarget> = Vec::new();
-    // 默认范围是「本 agent 通过 open 登记过的标签」。旧实现不做归属过滤，
+    // TA：默认范围是「本 agent 通过 open 登记过的标签」。旧实现不做归属过滤，
     // `--tab all` 会把别人的标签一起操作（多智能体/多用户共用同一浏览器时串线）。
     let owned: Option<HashSet<String>> = if agent_scope {
         let opened = state.agent_opened.lock().await;
@@ -250,6 +250,36 @@ pub(crate) async fn resolve_targets(
                 resolved.push(resolved_from_tab(resolved.len(), tab));
             }
         }
+        TargetSpec::Latest => {
+            // 语义优先级：daemon 记录的 latest_session_key（最近 open/连接）
+            // → connected_at 最大 → 列表最后一个。始终给一个确定结果，不静默退回 @1。
+            let latest_key = state.driver.read().await.latest_session_key.clone();
+            let chosen = latest_key
+                .as_deref()
+                .and_then(|key| tabs.iter().find(|tab| tab.session_key == key))
+                .or_else(|| {
+                    tabs.iter()
+                        .filter(|tab| tab.connected_at.is_some())
+                        .max_by(|left, right| {
+                            left.connected_at
+                                .unwrap_or(f64::NEG_INFINITY)
+                                .partial_cmp(&right.connected_at.unwrap_or(f64::NEG_INFINITY))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                })
+                .or_else(|| tabs.last());
+            match chosen {
+                Some(tab) => resolved.push(resolved_from_tab(0, tab)),
+                None => {
+                    return Err(TargetResolveError::new(
+                        "target_not_found",
+                        "没有可用的最新标签页",
+                        "先 `atb open <url>` 打开一个页面，再用 --tab @latest",
+                    )
+                    .with_candidates(candidates()));
+                }
+            }
+        }
         TargetSpec::Current => {
             if let Some(tab) = tabs.iter().find(|tab| tab.active) {
                 resolved.push(resolved_from_tab(0, tab));
@@ -270,7 +300,7 @@ pub(crate) async fn resolve_targets(
                     .iter()
                     .filter(|tab| tab.tab_id == *id || tab.session_key == *id)
                     .collect();
-                // 先按归属过滤，再判 0/1/多。这样「同一个 tab_id 在别的
+                // TA：先按归属过滤，再判 0/1/多。这样「同一个 tab_id 在别的
                 // profile 里也有一份」不会被误报成歧义——不属于本 agent 的那份
                 // 本来就不该被看见。
                 let matches: Vec<&TabInfo> = all_matches
@@ -470,7 +500,7 @@ pub(crate) async fn resolve_targets(
 
     if resolved.is_empty() {
         if skipped_foreign > 0 {
-            // 全部目标都被归属过滤掉了——这是「范围」问题，不是「没有标签」，
+            // TA：全部目标都被归属过滤掉了——这是「范围」问题，不是「没有标签」，
             // 直接说清楚并给出逃生口，否则调用方只会反复重试或以为浏览器空了。
             return Err(TargetResolveError::new(
                 "target_scope_empty",

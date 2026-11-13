@@ -3,7 +3,7 @@ use super::*;
 /// 当前标签所属站点的 content-script 匹配模式：`*://host/*`。
 ///
 /// 只在没有显式 `--match` 时用来收窄持久化注入，避免 `net hook --persist`
-/// 把脚本注册到所有网站。第二个返回值是「端口未能保留」的告警。
+// 把脚本注册到所有网站。第二个返回值是「端口未能保留」的告警。
 pub(crate) async fn current_site_match_pattern(
     state: &AppState,
     session_key: &str,
@@ -20,7 +20,7 @@ pub(crate) async fn current_site_match_pattern(
 
 /// 从 URL 提取 content-script match pattern；非 http(s) 页面返回 `None`。
 ///
-/// 以前手写切分有两个 bug：`https://example.com?q=1` 会把 query 当成 host，
+// 以前手写切分有两个 bug：`https://example.com?q=1` 会把 query 当成 host，
 /// 生成非法 pattern；`host.starts_with("chrom")` 又会误杀 `chromium.org`。
 /// 现在交给 `url` crate 解析，过滤条件改为按 scheme 判断。
 pub(crate) fn site_match_pattern(raw_url: &str) -> Option<String> {
@@ -42,7 +42,7 @@ pub(crate) fn site_match_pattern(raw_url: &str) -> Option<String> {
     Some(format!("*://{host}/*"))
 }
 
-/// 同 [`site_match_pattern`]，额外返回「端口未能保留」的告警。
+// 同 [`site_match_pattern`]，额外返回「端口未能保留」的告警。
 ///
 /// Chrome 的 match pattern 语法里 host 段不接受 `host:port`（注册时整条会被拒），
 /// pattern 里没有任何办法表达「只在这个端口生效」。所以持久注入只能按 host 注册，
@@ -90,7 +90,7 @@ pub(crate) fn net_config_default() -> Value {
     })
 }
 
-/// 取某个 profile 的落盘锁。
+// 取某个 profile 的落盘锁。
 ///
 /// 旧实现是一把**全局**单锁：两个 profile 的并发 net 命令排在同一条队列上，
 /// 每条最多等 `NET_RMW_LOCK_WAIT`（150s），叠加后调用方的请求预算必然先耗尽。
@@ -115,11 +115,11 @@ pub(crate) async fn profile_persist_lock(
 
 /// 把某个 profile 的 net 配置写入内存并落盘。
 ///
-/// **前提**：调用方已持有该 profile 的落盘锁（[`profile_persist_lock`]， 的
+// **前提**：调用方已持有该 profile 的落盘锁（[`profile_persist_lock`]， 的
 /// 读-改-写串行化）。这里不再自己拿锁：`net_value` 在整个「读 → 下发 → 写」期间
 /// 持锁，若这里再锁一次就是自死锁。落盘只带当前 profile 的条目，其余 profile 由
 /// 后台线程从磁盘读回后合并：旧实现克隆**所有** profile（mock body 可达 2MB）
-/// 再同步写盘，全部发生在 async worker 上，配置一多就会卡住整个 runtime。
+// 再同步写盘，全部发生在 async worker 上，配置一多就会卡住整个 runtime。
 pub(crate) async fn store_net_config_locked(state: &AppState, profile_key: &str, config: &Value) {
     {
         let mut driver = state.driver.write().await;
@@ -176,7 +176,7 @@ pub(crate) async fn remove_net_config_locked(state: &AppState, profile_key: &str
 mod net_settings_tests {
     use super::*;
 
-    /// match pattern 表达不了端口，所以只能告警；默认端口（url crate 归一化后
+    // match pattern 表达不了端口，所以只能告警；默认端口（url crate 归一化后
     /// `port()==None`）不该告警。
     #[test]
     fn site_pattern_reports_explicit_port_only() {

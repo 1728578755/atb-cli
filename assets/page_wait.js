@@ -25,6 +25,11 @@ function __abcWait(opts) {
   const jsCode = !jsFunc && opts.js ? String(opts.js) : '';
   const visible = opts.visible === true;
   const minIntervalMs = opts.minIntervalMs >= 0 ? Math.floor(opts.minIntervalMs) : 50;
+  // 两种「页面内观察器」模式的静默窗口（毫秒）。0 表示未启用；
+  // daemon 已把缺省值（ATB_WAIT_DOM_STABLE_MS / ATB_SCREENSHOT_NETWORK_IDLE_MS）
+  // 换算成具体毫秒，这里不再做二次默认。
+  const domStableMs = opts.domStableMs > 0 ? Math.floor(opts.domStableMs) : 0;
+  const networkIdleMs = opts.networkIdleMs > 0 ? Math.floor(opts.networkIdleMs) : 0;
 
   let observer = null;
   let timer = null;
@@ -165,10 +170,276 @@ function __abcWait(opts) {
     return { matched: shown, visible: shown };
   }
 
+  // `--dom-stable`：等 DOM 连续 `domStableMs` 没有任何变更。
+  ///
+  /// MutationObserver 只负责「重置静默计时」，真正的判定用 setTimeout：
+  /// 后台标签页的定时器会被 Chrome 节流，但那只让判定**偏晚**，不会把仍在
+  /// 变化的页面误判成稳定（每次变更都会把旧计时器清掉）。
+  function waitDomStable() {
+    return new Promise(function (resolve) {
+      let mutations = 0;
+      let lastMutationAt = 0;
+      let observer = null;
+      let quietTimer = null;
+      let timeoutTimer = null;
+      let finished = false;
+
+      function elapsed() {
+        return Math.round((now() - started) * 10) / 10;
+      }
+
+      function cleanup() {
+        if (observer) {
+          try { observer.disconnect(); } catch (_) {}
+          observer = null;
+        }
+        if (quietTimer) {
+          clearTimeout(quietTimer);
+          quietTimer = null;
+        }
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+      }
+
+      function succeed() {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        resolve({
+          ok: true,
+          matched: true,
+          mode: 'dom-stable',
+          mode_used: 'dom-stable',
+          stable_ms: domStableMs,
+          mutations: mutations,
+          elapsed_ms: elapsed()
+        });
+      }
+
+      function armQuiet() {
+        if (finished) return;
+        if (quietTimer) clearTimeout(quietTimer);
+        quietTimer = setTimeout(succeed, domStableMs);
+      }
+
+      try {
+        observer = new MutationObserver(function (records) {
+          if (finished) return;
+          mutations += (records && records.length) || 1;
+          lastMutationAt = Math.round(now() - started);
+          armQuiet();
+        });
+        observer.observe(document.documentElement || document, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          characterData: true
+        });
+      } catch (_) {
+        // 观察器装不起来时仍按「从此刻起静默」判定：最坏情况是把一个不再
+        // 变化的页面判为稳定，而不是永远等不到。
+        observer = null;
+      }
+
+      armQuiet();
+      timeoutTimer = setTimeout(function () {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        resolve({
+          ok: false,
+          matched: false,
+          mode: 'dom-stable',
+          mode_used: 'dom-stable',
+          reason: 'timeout',
+          mutations: mutations,
+          last_mutation_ms: lastMutationAt,
+          elapsed_ms: elapsed()
+        });
+      }, timeoutMs);
+    });
+  }
+
+  // `--network-idle`：页面内 hook `fetch` / `XMLHttpRequest`，统计在途请求，
+  /// 归零并持续 `networkIdleMs` 视为空闲。
+  ///
+  /// hook 挂在 `window.__abcNetIdleHook`（不可枚举），重复注入复用同一份计数，
+  /// 不会层层包装。**不 hook WebSocket / EventSource**：它们没有天然的「完成」
+  /// 语义，长连接会让空闲永远判不出来；这两类流量不计入 inflight。
+  function waitNetworkIdle() {
+    const note = '仅统计等待开始后的 fetch/XHR 请求';
+    return new Promise(function (resolve) {
+      let finished = false;
+      let tickTimer = null;
+      let timeoutTimer = null;
+      let hookInstalled = false;
+
+      function elapsed() {
+        return Math.round((now() - started) * 10) / 10;
+      }
+
+      function cleanup() {
+        if (tickTimer) {
+          clearTimeout(tickTimer);
+          tickTimer = null;
+        }
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+      }
+
+      function finish(ok, extra) {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        const payload = Object.assign({
+          ok: ok,
+          matched: ok,
+          mode: 'network-idle',
+          mode_used: 'network-idle',
+          note: note,
+          elapsed_ms: elapsed()
+        }, extra || {});
+        resolve(payload);
+      }
+
+      function installHook() {
+        let state = null;
+        try {
+          state = window.__abcNetIdleHook;
+        } catch (_) {
+          state = null;
+        }
+        if (state && typeof state.inflight === 'number') {
+          hookInstalled = true;
+          return state;
+        }
+        state = { inflight: 0, last: now(), installed: true };
+        const track = function () {
+          state.inflight += 1;
+          state.last = now();
+        };
+        const done = function () {
+          state.inflight = Math.max(0, state.inflight - 1);
+          state.last = now();
+        };
+        try {
+          const originalFetch = window.fetch;
+          if (typeof originalFetch === 'function' && !originalFetch.__abcNetIdleWrapped) {
+            const wrappedFetch = function () {
+              track();
+              let pending = null;
+              try {
+                pending = originalFetch.apply(this, arguments);
+              } catch (error) {
+                done();
+                throw error;
+              }
+              if (pending && typeof pending.finally === 'function') {
+                return pending.finally(done);
+              }
+              done();
+              return pending;
+            };
+            try {
+              Object.defineProperty(wrappedFetch, '__abcNetIdleWrapped', {
+                value: true,
+                configurable: true,
+                enumerable: false
+              });
+            } catch (_) {
+              wrappedFetch.__abcNetIdleWrapped = true;
+            }
+            window.fetch = wrappedFetch;
+          }
+        } catch (_) {}
+        try {
+          const proto = XMLHttpRequest.prototype;
+          const originalSend = proto.send;
+          if (typeof originalSend === 'function' && !originalSend.__abcNetIdleWrapped) {
+            const wrappedSend = function () {
+              track();
+              let settled = false;
+              const settle = function () {
+                if (settled) return;
+                settled = true;
+                done();
+              };
+              try {
+                this.addEventListener('loadend', settle, { once: true });
+              } catch (_) {}
+              try {
+                return originalSend.apply(this, arguments);
+              } catch (error) {
+                settle();
+                throw error;
+              }
+            };
+            try {
+              Object.defineProperty(wrappedSend, '__abcNetIdleWrapped', {
+                value: true,
+                configurable: true,
+                enumerable: false
+              });
+            } catch (_) {
+              wrappedSend.__abcNetIdleWrapped = true;
+            }
+            proto.send = wrappedSend;
+          }
+        } catch (_) {}
+        try {
+          Object.defineProperty(window, '__abcNetIdleHook', {
+            value: state,
+            configurable: true,
+            enumerable: false
+          });
+        } catch (_) {}
+        hookInstalled = true;
+        return state;
+      }
+
+      const state = installHook();
+      if (!state) {
+        finish(false, {
+          reason: 'hook_unavailable',
+          error: 'network_idle_hook_unavailable',
+          inflight: null,
+          hook_installed: false
+        });
+        return;
+      }
+
+      function tick() {
+        if (finished) return;
+        if (state.inflight <= 0 && now() - state.last >= networkIdleMs) {
+          finish(true, {
+            inflight: 0,
+            idle_ms: networkIdleMs,
+            hook_installed: hookInstalled
+          });
+          return;
+        }
+        tickTimer = setTimeout(tick, 50);
+      }
+
+      tickTimer = setTimeout(tick, Math.min(50, networkIdleMs));
+      timeoutTimer = setTimeout(function () {
+        finish(false, {
+          reason: 'timeout',
+          inflight: state.inflight,
+          hook_installed: hookInstalled
+        });
+      }, timeoutMs);
+    });
+  }
+
   function evaluate() {
     if (selector) return checkSelector();
     if (text) return checkText();
-    return { matched: false, error: 'wait: 需要 selector / text / js' };
+    return { matched: false, error: 'wait: 需要 selector / text / js / domStableMs / networkIdleMs' };
   }
 
   // 谓词编译：三种写法都要支持——语句级 return、裸表达式、多语句 + await。
@@ -198,6 +469,15 @@ function __abcWait(opts) {
     return /unsafe-eval|Refused to evaluate|Content Security Policy/i.test(detail);
   }
 
+  // 模式优先级：js > selector > text > dom-stable > network-idle。
+  /// 新模式只在没有任何旧条件时启用；同时给多个时旧条件优先，结果里的
+  /// `mode_used` 说明本次实际用的是哪一种。
+  const hasPredicateRequest = typeof jsFunc === 'function' || !!jsCode;
+  if (!hasPredicateRequest && !selector && !text) {
+    if (domStableMs > 0) return waitDomStable();
+    if (networkIdleMs > 0) return waitNetworkIdle();
+  }
+
   let predicate = jsFunc;
   if (!predicate && jsCode) {
     let compileError = null;
@@ -215,6 +495,7 @@ function __abcWait(opts) {
           ok: false,
           matched: false,
           mode: 'js-observer',
+          mode_used: 'js',
           error: 'wait_js_eval_blocked: ' + detail,
           error_code: 'wait_js_eval_blocked',
           hint: '页面 CSP 禁止 unsafe-eval：字符串谓词无法在页面内编译。'
@@ -229,6 +510,7 @@ function __abcWait(opts) {
         ok: false,
         matched: false,
         mode: 'js-observer',
+        mode_used: 'js',
         error: 'js_predicate_compile_failed: ' + detail,
         error_code: 'js_predicate_compile_failed',
         // 语法错误：与 CSP 无关，换执行通道也一样失败。
@@ -247,6 +529,12 @@ function __abcWait(opts) {
     let lastError = null;
     let lastValue = null;
     let running = false;
+    // `wait --js` 超时时回传最近 5 次求值（值或错误）。元素节点用 describeValue
+    // 摘要，其它值统一做 JSON 安全摘要 —— 函数 / Symbol / 循环引用直接序列化会让
+    // 扩展通道丢包或抛错。
+    const RECENT_LIMIT = 5;
+    const recent = [];
+    const modeUsed = hasPredicate ? 'js' : (selector ? 'selector' : (text ? 'text' : 'none'));
 
     function cleanup() {
       if (observer) {
@@ -280,6 +568,7 @@ function __abcWait(opts) {
         polls: checks,
         checks: checks,
         mode: mode,
+        mode_used: modeUsed,
         elapsed_ms: Math.round((now() - started) * 10) / 10
       }, extra || {});
       // 仅 --text 条件会填：本次命中判定实际用的是 innerText 还是（超大 DOM 降级后的）
@@ -308,6 +597,52 @@ function __abcWait(opts) {
       return value;
     }
 
+    /// JSON 安全摘要：只给调用方看「最近几次求值大概是什么」，
+    /// 不承诺完整还原（函数 / 节点 / 循环引用都只留可读标记）。
+    function summarizeValue(value, depth) {
+      const level = depth || 0;
+      try {
+        if (value === null) return null;
+        const kind = typeof value;
+        if (kind === 'undefined') return '[undefined]';
+        if (kind === 'string') {
+          return value.length > 200 ? value.slice(0, 200) + '…' : value;
+        }
+        if (kind === 'boolean') return value;
+        if (kind === 'number') return isFinite(value) ? value : String(value);
+        if (kind === 'bigint') return String(value) + 'n';
+        if (kind === 'symbol') return String(value);
+        if (kind === 'function') return '[Function ' + (value.name || 'anonymous') + ']';
+        if (value.nodeType === 1) return describeValue(value);
+        if (value.nodeType) return '[Node ' + (value.nodeName || value.nodeType) + ']';
+        if (level >= 2) return Array.isArray(value) ? '[Array]' : '[Object]';
+        if (Array.isArray(value)) {
+          const items = [];
+          const limit = Math.min(value.length, 10);
+          for (let i = 0; i < limit; i += 1) {
+            items.push(summarizeValue(value[i], level + 1));
+          }
+          if (value.length > limit) items.push('…' + (value.length - limit) + ' more');
+          return items;
+        }
+        const out = {};
+        const keys = Object.keys(value).slice(0, 10);
+        for (let i = 0; i < keys.length; i += 1) {
+          out[keys[i]] = summarizeValue(value[keys[i]], level + 1);
+        }
+        if (Object.keys(value).length > keys.length) out.__truncated__ = true;
+        return out;
+      } catch (_) {
+        return '[Unserializable]';
+      }
+    }
+
+    function recordRecent(entry) {
+      entry.at_ms = Math.round((now() - started) * 10) / 10;
+      recent.push(entry);
+      if (recent.length > RECENT_LIMIT) recent.splice(0, recent.length - RECENT_LIMIT);
+    }
+
     function runPredicate() {
       if (done || running) return;
       running = true;
@@ -319,16 +654,19 @@ function __abcWait(opts) {
       } catch (e) {
         running = false;
         lastError = (e && e.message) || String(e);
+        recordRecent({ error: lastError });
         return;
       }
       Promise.resolve(pending).then(function (value) {
         running = false;
         lastValue = value;
         lastError = null;
+        recordRecent({ value: summarizeValue(value) });
         if (value) finish(true, { value: describeValue(value) });
       }, function (err) {
         running = false;
         lastError = (err && err.message) || String(err);
+        recordRecent({ error: lastError });
       });
     }
 
@@ -438,6 +776,8 @@ function __abcWait(opts) {
     // 兜底定时器：只用于「一直不满足」时按时返回，不参与命中判断。
     timer = setTimeout(function () {
       const payload = { error: lastError || 'timeout', reason: 'timeout', value: lastValue };
+      // 把最近 5 次求值（值或错误）一起交回；现有 `value` 字段保持旧语义。
+      if (recent.length) payload.last_values = recent.slice();
       // 超时也要能回答 --text --visible 的可见性结论：文本存在但不可见时
       // matched 一直是 false，若不回传就看不出「命中了但被隐藏」。
       if (textVisibleState !== null) payload.visible = textVisibleState;

@@ -16,6 +16,12 @@
 | 两个智能体互相看到对方页面 | 身份与 `--tab` | 10 |
 | 其它 | 日志 | 11 |
 | `wait_js_failed` / `outcome_unknown` / `ws_backpressure` 等新码 | 错误码含义与处置 | 12 |
+| 后台标签懒加载 / 动画不触发 | `tab_hidden` / `timers_throttled` 警告 | 13 |
+| 注入后 `GM_getValue is not defined` | 是否用了 `--userscript` | 14 |
+| 页面出现两份宿主 / 重复面板 | 安装版脚本与 atb 注入共存 | 15 |
+| `inject --list` 有残留 / 持久注入过期 | TTL 与 `--remove` | 16 |
+| 截图截到别的标签 / 整页固定元素重复 | `captured_tab` 与 fixed/sticky | 17 |
+| `@1` 打错标签 | `@N` 与 `@latest` 语义 | 18 |
 
 ## 1. daemon 没起来
 
@@ -37,7 +43,7 @@
 
 ## 4. 协议或版本不配套
 
-**症状**：`CLI 与 daemon 版本不配套`、`extension_outdated`、`upgrade_recommended:true`、`stealth` 返回 `extension_ok:false`。**判断**：三方须配套：API 协议 `5`、扩展消息协议 `4`、扩展文件版本 `5.4.2`。不配套时命令明确报错，不会静默跑错。
+**症状**：`CLI 与 daemon 版本不配套`、`extension_outdated`、`upgrade_recommended:true`、`stealth` 返回 `extension_ok:false`。**判断**：三方须配套：API 协议 `5`、扩展消息协议 `4`、扩展文件版本 `5.5.0`。不配套时命令明确报错，不会静默跑错。
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
@@ -190,13 +196,144 @@ cp -r skills/atb/. ~/.workbuddy/skills/atb/
 atb schema --json
 ```
 
-## 12. 新增错误码（0.7.4）
+## 12. 新增错误码（0.8.0）
 
 | 错误码 | 症状 | 判断 | 处理 |
 | --- | --- | --- | --- |
 | `wait_js_failed` | `exec --wait-js` 返回 `ok:false`，但脚本已经执行 | 等待条件没满足；`js_return` 里可能已有结果，`wait.ok=false` / `matched=false` | 按失败处理，不要当成功继续；加 `--wait-timeout`、改谓词（保持轻量），或先 `wait` 再取结果 |
 | `challenge_probe_failed` | `challenge status` 返回 `probed:false`、`status_usable:false` | 挑战探测拿不到可用载荷：扩展断连、注入被拒、或页面已导航 | 重试一次；持续失败看 `atb doctor`，**不要**当成「没有挑战」继续操作 |
 | `host_not_allowed` | CLI 连 daemon 返回 403 | 请求的 `Host` 不是 `127.0.0.1` / `localhost` / `[::1]` | 用回环地址访问；不要用局域网 IP、自定义域名或反代主机名 |
-| `ws_backpressure` | 命令偶发失败，扩展侧卡顿 | 当前只把 pong 控制通道改成有界（`ATB_WS_OUTBOUND_MAX`），命令通道仍是 `unbounded`，所以该错误码目前是**预留**，正常不会出现 | 偶发卡顿等几秒重试；持续出现重载扩展或 `atb restart`；大量并发改用 `batch` 控制并发 |
+| `ws_backpressure` | 命令偶发失败，扩展侧卡顿 | 目前只把 pong 控制通道改成有界（`ATB_WS_OUTBOUND_MAX`），命令通道仍是 `unbounded`，所以该错误码目前是**预留**，正常不会出现 | 偶发卡顿等几秒重试；持续出现重载扩展或 `atb restart`；大量并发改用 `batch` 控制并发 |
 | `outcome_unknown` | 退出码 4，`outcome_unknown:true` | 请求已发出但响应丢失（超时/断连），动作**可能已执行** | 带同一个 `--idempotency-key` 重发；不要换 key 重试副作用命令；先 `status` 看会话是否还活着 |
 | `agent_no_default` | `target_lost`，`reason:"agent_no_default"` | `ATB_SESSION_ISOLATION=strict`，具名 agent 没有自己的默认目标 | 先 `atb open <url>` 建默认；或临时改回 `legacy`（`ATB_SESSION_ISOLATION=legacy`） |
+| `focus_failed` | `atb focus` 返回失败 | 标签可能已关闭、扩展过旧，或窗口/标签切换被浏览器拒绝 | `tabs --ids` 确认标签仍在；重载扩展；只想切标签不抢系统焦点时加 `--no-window` |
+| `permission_required` | `atb extensions` 返回失败 | 扩展没有授予可选权限 `management` | 打开扩展设置页「关于 → 高级权限」，由用户点击授权；授权成功后扩展会自动重载一次（MV3 SW 需要重载才能拿到 management API），刷新后重试；这是可选权限，不影响其它命令 |
+| `daemon_outdated` | 新命令报 HTTP 404 / `invalid_response` | CLI 已升级，但常驻 daemon 还是旧二进制，未知路由 | `atb restart` 后重试；必要时 `atb restart --force` |
+| `syntax_error` | `exec` / `inject` 在发送前失败 | 本地 JS 配平/语法检查未通过，错误带行列与片段 | 按提示修正；确认是误报时用 `--no-preflight` 或 `ATB_JS_CHECK=off` |
+| `inject_script_threw` | `inject` 顶层 `ok:false`，但 `executed:true` | 脚本已经执行并自己抛错；副作用可能已发生 | 看 `threw` 与脚本逻辑；不要当注入通道失败盲目重试 |
+| `unsupported_selector` | `measure` 等命令拒绝选择器 | 传了 `@e`、伪类前缀或不受支持的形态 | 用 `find` 拿真实 CSS 选择器；shadow DOM 写 `host >>> inner` |
+| `exec_result_not_found` | `job result` 找不到结果 | `exec_id` 错误、结果已被取走，或超过 TTL | 确认 `exec_id` 来自超时错误；长任务调大 `ATB_EXEC_RESULT_TTL_SEC` 或改用 `--async` + `job wait` |
+| `cdp_required` | `screenshot --require-cdp` 失败 | CDP 不可用（页面嵌了别的扩展 iframe，或 `ATB_NO_DEBUGGER=1`） | 去掉 `--require-cdp` 接受回落，或让用户临时关闭挡路扩展 |
+| `invalid_encoding` | `exec --file` / `inject --file` 失败 | 脚本文件不是 UTF-8 | 转成 UTF-8；或用 `--file -` 从 stdin 传入 |
+| `script_file_too_large` | 读取脚本文件失败 | 文件超过 `ATB_SCRIPT_FILE_MAX_MB`（默认 32MiB） | 拆成多个 `--file`，或提高 `ATB_SCRIPT_FILE_MAX_MB` |
+
+## 13. 后台标签页懒加载 / 动画不触发
+
+**症状**：命令 `ok:true`，但懒加载列表没加载、图表没渲染、`requestAnimationFrame` / `IntersectionObserver` 回调不执行；响应 `warnings` 里有 `tab_hidden` / `timers_throttled`；`env` 的 `warnings` 提示默认目标在后台。
+
+**判断**：Chrome 会暂停后台标签的 rAF 与 IntersectionObserver 回调，并节流定时器。`ATB_HIDDEN_TAB_WARNING=off` 只是关掉提示，不会改变浏览器行为。`resolved_target.active` / `visible` 为 `false` 就是后台。
+
+**处理**：
+
+```bash
+atb focus --tab @latest
+atb focus --tab <tabId> --no-window     # 只激活标签，不抢系统窗口焦点
+atb env                                  # 看 default_target.visible 与 warnings
+```
+
+- 需要可见行为（截图、动画、懒加载、可见性判断）时先 `focus`，再执行读取 / 截图。
+- 不要用固定 `sleep` 等懒加载；先 `focus`，再 `wait --selector` 或 `wait --dom-stable`。
+- `atb screenshot` 的 `tab_visible` / `captured_tab` 可以确认截图时目标是否真的可见。
+
+## 14. 注入环境没有 GM API
+
+**症状**：脚本报 `GM_getValue is not defined`、`unsafeWindow is not defined`，或 `GM_xmlhttpRequest is not supported by atb userscript shim`。
+
+**判断**：只有 `inject --userscript` 才注入 GM shim；普通 `inject` / `exec` 是裸脚本环境。GM shim 是最小实现，不是完整 Tampermonkey：不支持 `GM_xmlhttpRequest`，不会处理 `@require` / `@resource`，`@grant` 只用于元数据展示。
+
+**处理**：
+
+```bash
+atb inject --userscript --file ./fix.user.js --gm-namespace fix-demo
+atb exec 'return {gm: typeof GM_getValue, u: typeof unsafeWindow, info: typeof GM_info}'
+```
+
+- 确认命令里带了 `--userscript`，并且 `--file` 指向真实脚本。
+- 需要页面全局变量（`unsafeWindow`）时用默认 `--world main`；`--world isolated` 看不到页面变量。
+- 依赖 `GM_xmlhttpRequest` 的脚本要在页面内改用 `fetch`，或由宿主代发请求；`@require` 的库需要手动拼进 `--file`。
+- 脚本抛错会返回 `inject_script_threw`；先看 `threw`，不要把它当成 GM 环境缺失。
+
+## 15. 页面已有安装版脚本导致重复宿主
+
+**症状**：页面出现两个面板 / 两份角标，事件触发两次，网络请求翻倍；`document.querySelectorAll('#fix-host').length` 大于 1。
+
+**判断**：用户已在 Tampermonkey / Violentmonkey 里装了同一脚本，atb 又注入了一份；或之前多次 `inject` 没清理旧节点。
+
+**处理**：
+
+```bash
+atb exec 'return document.querySelectorAll("#fix-host").length'
+atb inject --userscript --file ./fix.user.js --cleanup-selector '#fix-host'
+atb inject --list                       # 看是否有旧的持久注入
+atb inject --remove <旧 name>
+```
+
+- 最稳的是让用户在该站点临时停用安装版，再测试 atb 注入版。
+- 脚本自身应做幂等：注入前判断宿主是否存在，存在就复用或先移除。
+- `--cleanup-selector` 可写多次；`--cleanup-file` 适合删除旧全局变量或复杂旧节点。
+- 不要靠反复 `inject` 覆盖：旧节点和旧事件监听不会自动消失。
+
+## 16. persist 残留 / 过期
+
+**症状**：`inject --list` 里还有早已不用的名字；或之前能跨导航生效的脚本突然不再注入；`expires_in_sec` 很小或为 `null`。
+
+**判断**：`--persist` 默认 7200 秒（2 小时）过期，扩展设置页的 `persistTtlSec` 参与默认值；`expires_in_sec:null` 表示永久，数字是剩余秒数。读取列表时会清掉已过期条目，所以「名字消失」通常就是过期；`--match` 写得太窄也会让新页面不命中。
+
+**处理**：
+
+```bash
+atb inject --list
+atb inject --remove <name>
+atb inject --userscript --file ./fix.user.js --persist <name> --ttl 600   # 重新注入给更短寿命
+atb inject --userscript --file ./fix.user.js --persist <name> --persist-forever --i-know-this-is-long-lived
+```
+
+- 清理不再需要的持久注入，避免它们在新页面里继续跑。
+- 永久驻留必须同时给 `--persist-forever --i-know-this-is-long-lived`；只给其中一个会被预检拒绝。
+- `--match` 默认 `<all_urls>`，测试时尽量收窄到目标站点，减少残留影响。
+- 改了脚本内容要重新 `inject --persist`，旧条目不会自动更新。
+
+## 17. 截图截到前台窗口 / 整页重复
+
+**症状**：截图内容和目标标签不一致；`captured_tab.tab_id` 不是请求的 tab；整页截图底部出现重复的导航栏 / 悬浮按钮。
+
+**判断**：
+
+- `captureVisibleTab` 只能截「浏览器前台窗口的当前激活标签」。目标在后台、用户切了窗口，或 `focus` 与截图之间又被切走，就可能截到别人。
+- 整页 CDP `captureBeyondViewport` 下 `position:fixed/sticky` 元素可能在底部重复；逐屏拼接通道则是在每一屏重复。这是浏览器渲染限制。
+- `tab_visible` / `captured_tab` / `clip_box` / `degraded` 是判断依据，不要只看 `ok:true`。
+
+**处理**：
+
+```bash
+atb focus --tab <tabId>
+atb screenshot --wait-selector '#main' --network-idle --out shot.png
+atb screenshot --full-page --require-cdp --out full.png
+atb screenshot --selector '#main' --out main.png      # 只要内容区时优先元素截图
+```
+
+- 先 `focus` 再截图，中间不要并行执行会切标签的命令。
+- 需要确定性 CDP 时加 `--require-cdp`，失败会直接报 `cdp_required`。
+- 固定元素重复：临时用 `inject` 改成 `position:absolute`，或改截元素 / 视口，不要期望 `--max-height` 能去掉重复。
+- `clip_box` 是 CSS px；`--max-height` 是设备像素，HiDPI 下不要混用。
+
+## 18. `@1` 打错标签
+
+**症状**：`--tab @1` 打到了用户刚开的页面，或和上一次不是同一个；`--tab @latest` 与 `@1` 结果不同。
+
+**判断**：`@N` 是 `tabs` 当前输出顺序的第 N 个，浏览器新开标签、切换顺序或过滤条件变化都会让它指向别的页面；`@latest` 才是 daemon 记录的最近打开 / 连接标签。
+
+**处理**：
+
+```bash
+atb tabs --ids
+atb tabs --url-contains example --format tsv
+atb use <tabId>                 # 固定默认目标，后续裸命令不再漂移
+atb focus --tab @latest
+atb click --tab @1 --dry-run    # 先看 targets 再执行
+```
+
+- 关键操作一律显式写 `tab_id`，不要依赖 `@N`。
+- 需要「刚才打开的那个」用 `@latest`；需要「列表第 1 个」才用 `@1`。
+- `use <tabId>` 之后，裸命令固定打到该标签；换目标时重新 `use`。
+- 多目标 `@1,@3` / `@1-@3` 已支持逐 token 解析，但仍建议先 `--dry-run` 核对 `targets`。

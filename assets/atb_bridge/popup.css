@@ -1,6 +1,6 @@
 /* popup 布局。
  *
- * 尺寸策略（视觉重做）：
+ * 尺寸策略：
  *   - 宽度跟随可用视口，永远不超出 100vw；三档宽度存在 storage.popupWidthMode；
  *   - 头部与分区条固定，只有内容区滚动，避免「整页滚 + 列表滚」双层滚动；
  *   - 高度上限 600px（Chrome 弹窗上限），内容更少时按内容收缩。
@@ -26,10 +26,13 @@ body {
      列居中，不再贴在左上角。 */
   margin: 0 auto;
   background: var(--bg);
+  /* 头部、分区条、内容区共用同一条左右内边距，三段的左边界才对得齐。 */
+  --popup-pad-x: 12px;
 }
 
 body[data-width="compact"] {
   width: 340px;
+  --popup-pad-x: 10px;
 }
 
 body[data-width="wide"] {
@@ -44,7 +47,8 @@ body[data-width="wide"] {
   justify-content: space-between;
   gap: 8px;
   flex: 0 0 auto;
-  padding: 10px 12px 6px;
+  /* 上下等距，brand / 状态药丸 / 图标按钮以同一中线垂直居中。 */
+  padding: 10px var(--popup-pad-x);
   background: var(--bg);
 }
 
@@ -64,11 +68,15 @@ body[data-width="wide"] {
   font-size: var(--text-md);
   font-weight: 700;
   letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .brand-ver {
   font-size: 10.5px;
+  line-height: 1;
   color: var(--text-3);
+  white-space: nowrap;
 }
 
 .appbar-right {
@@ -103,7 +111,7 @@ body[data-width="wide"] {
   display: flex;
   gap: 2px;
   flex: 0 0 auto;
-  margin: 0 12px 8px;
+  margin: 0 var(--popup-pad-x) 8px;
   padding: 3px;
   border-radius: var(--radius-md);
   background: var(--surface-2);
@@ -114,7 +122,9 @@ body[data-width="wide"] {
   align-items: center;
   justify-content: center;
   gap: 5px;
+  /* 三段等宽，不随文案长度变化；选中态背景也就能左右对齐。 */
   flex: 1 1 0;
+  min-width: 0;
   min-height: 26px;
   padding: 0 6px;
   border: 1px solid transparent;
@@ -124,6 +134,7 @@ body[data-width="wide"] {
   font-family: inherit;
   font-size: var(--text-sm);
   font-weight: 600;
+  line-height: 1;
   cursor: pointer;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
     box-shadow var(--dur) var(--ease);
@@ -141,6 +152,7 @@ body[data-width="wide"] {
 }
 
 .tab-count {
+  flex: 0 0 auto;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
@@ -158,7 +170,7 @@ body[data-width="wide"] {
 .content {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0 12px 12px;
+  padding: 0 var(--popup-pad-x) 12px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -169,14 +181,14 @@ body[data-width="wide"] {
 }
 
 body[data-width="compact"] .content {
-  padding: 0 10px 10px;
+  padding: 0 var(--popup-pad-x) 10px;
 }
 
 /* ------------------------------------------------------------- 状态卡片 */
 
 .hero {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
@@ -270,7 +282,10 @@ body[data-width="compact"] .content {
 
 .cookie-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  /* 名称 / 值 / 标记三列，行与行之间列边界一致；值超长用省略号，不把卡片撑破。
+     标记列固定 50px：每行是独立 grid，auto 会让「无标记」的行把值列推前。 */
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr) 50px;
+  align-items: center;
   gap: 2px 8px;
   padding: 7px 10px;
   border-top: 1px solid var(--border);
@@ -281,6 +296,7 @@ body[data-width="compact"] .content {
 }
 
 .cookie-name {
+  min-width: 0;
   font-size: var(--text-sm);
   font-weight: 600;
   overflow: hidden;
@@ -292,6 +308,7 @@ body[data-width="compact"] .content {
   display: inline-flex;
   gap: 3px;
   align-items: center;
+  justify-self: end;
 }
 
 .flag {
@@ -312,12 +329,13 @@ body[data-width="compact"] .content {
 }
 
 .cookie-value {
-  grid-column: 1 / -1;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-2);
-  overflow-wrap: anywhere;
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cookie-item.is-secret .cookie-value {
@@ -349,17 +367,34 @@ body[data-width="compact"] .toolbar {
   flex-wrap: wrap;
 }
 
-body[data-width="compact"] .hero {
-  flex-direction: column;
-  align-items: stretch;
-}
-
-body[data-width="compact"] #reconnect {
-  align-self: flex-start;
-}
-
 body[data-width="compact"] .kv-row {
-  grid-template-columns: minmax(64px, auto) minmax(0, 1fr);
+  grid-template-columns: 68px minmax(0, 1fr);
+}
+
+/* 界面卡的三列：标准档两列 + 第三项占满整行，宽档三列，紧凑档单列。
+   避免 auto-fit 在 420px 下出现「前两列 178px、第三列孤零零 178px」的错位。 */
+.field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.field-grid > .field:last-child {
+  grid-column: 1 / -1;
+}
+
+body[data-width="wide"] .field-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+body[data-width="wide"] .field-grid > .field:last-child {
+  grid-column: auto;
+}
+
+body[data-width="compact"] .field-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body[data-width="compact"] .field-grid > .field:last-child {
+  grid-column: auto;
 }
 
 ::-webkit-scrollbar {
@@ -444,6 +479,10 @@ body[data-mode="page"] .field > .input {
 /* 页面模式固定三列：主题 / 弹窗宽度 / 间距 一行放下，不会出现「第三个掉到下一行」。 */
 body[data-mode="page"] .field-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+body[data-mode="page"] .field-grid > .field:last-child {
+  grid-column: auto;
 }
 
 /* 页头版本号后面标一下来源，避免误以为这是官方独立页面。 */

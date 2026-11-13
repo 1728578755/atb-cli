@@ -179,6 +179,12 @@ pub(crate) fn json_result_with_inner_ok(result: Result<Value>) -> Value {
             if let Some(code) = error_code {
                 out["error_code"] = code;
             }
+            // 内层已经给出可执行提示时不要丢：调用方拿到 ok:false 后最需要的就是下一步。
+            for key in ["hint", "retryable", "retry_after_ms"] {
+                if let Some(field) = value.get(key) {
+                    out[key] = field.clone();
+                }
+            }
             out
         }
         Err(err) => json!({ "ok": false, "error": err.to_string() }),
@@ -378,7 +384,37 @@ pub(crate) async fn inject(
     Json(req): Json<InjectRequest>,
 ) -> Json<Value> {
     touch(&state).await;
-    Json(json_result(inject_value(&state, req).await))
+    // 脚本抛错时 inject_value 会返回 `{ok:false, executed:true, threw:...}`，
+    // 必须让顶层 ok 跟着变 false（旧实现用 json_result 会包成 ok:true，调用方
+    // 以为执行成功）。同时把执行结果字段提到顶层，形状与改进意见文档一致。
+    let value = inject_value(&state, req).await;
+    let inner = value.as_ref().ok().cloned();
+    let mut out = json_result_with_inner_ok(value);
+    if let Some(inner) = inner {
+        if let Some(object) = inner.as_object() {
+            for key in [
+                "executed",
+                "returned",
+                "threw",
+                "duration_ms",
+                "action",
+                "name",
+                "count",
+                "warning",
+                "warnings",
+                "note",
+                "cleanup",
+            ] {
+                if let Some(field) = object.get(key) {
+                    out[key] = field.clone();
+                }
+            }
+            if let Some(hint) = object.get("hint") {
+                out["hint"] = hint.clone();
+            }
+        }
+    }
+    Json(out)
 }
 
 pub(crate) async fn inject_value(state: &AppState, req: InjectRequest) -> Result<Value> {
@@ -407,7 +443,7 @@ pub(crate) async fn inject_value(state: &AppState, req: InjectRequest) -> Result
         SessionSelector::new(req.switch_tab_id, req.browser, req.profile),
     )
     .await?;
-    let mut payload = json!({ "action": action });
+    let mut payload = json!({ "action": action, "userscript": req.userscript });
     if let Some(code) = req.code {
         payload["code"] = json!(code);
     }
@@ -426,16 +462,101 @@ pub(crate) async fn inject_value(state: &AppState, req: InjectRequest) -> Result
     if req.all_frames {
         payload["allFrames"] = json!(true);
     }
-    let value = extension_control(
+    // 清理参数对 run / persist 都有效（扩展在真正执行前先跑清理）。
+    // 字段始终下发（空数组 / null），新旧扩展都不需要区分「缺省」与「清空」。
+    payload["cleanupSelectors"] = json!(req.cleanup_selectors);
+    payload["cleanupCode"] = req
+        .cleanup_code
+        .as_deref()
+        .filter(|code| !code.trim().is_empty())
+        .map_or(Value::Null, |code| json!(code));
+    payload["gmNamespace"] = req
+        .gm_namespace
+        .as_deref()
+        .filter(|namespace| !namespace.trim().is_empty())
+        .map_or(Value::Null, |namespace| json!(namespace));
+    match action.as_str() {
+        // `--persist` 默认 2 小时 TTL；永久必须显式 --persist-forever。
+        // 旧扩展忽略这两个字段（保持旧行为：永久），新扩展按 TTL 落库。
+        "persist" => {
+            // 显式 --ttl 才下发 ttlSec；否则下发 defaultTtlSec，让扩展优先采用
+            // 用户在扩展设置页选的 persistTtlSec（没有设置时回落到这个默认值）。
+            let ttl_sec = if req.persist_forever {
+                None
+            } else {
+                req.ttl_sec
+                    .map(|secs| secs.clamp(1, crate::settings::inject_persist_max_ttl_sec()))
+            };
+            payload["ttlSec"] = ttl_sec.map_or(Value::Null, |secs| json!(secs));
+            payload["persistForever"] = json!(req.persist_forever);
+            payload["defaultTtlSec"] = json!(crate::settings::inject_persist_default_ttl_sec());
+        }
+        // 扩展用 defaultTtlSec 迁移「没有 expiresAt」的旧条目。
+        "list" => {
+            payload["defaultTtlSec"] = json!(crate::settings::inject_persist_default_ttl_sec());
+        }
+        _ => {}
+    }
+    // 不用 extension_control：它把 `ok:false` 一律收敛成 `Err`，会丢掉需要的
+    // executed / returned / threw / duration_ms 结构。这里自己组包并保底判错；
+    // 其余行为（会话锁、tabId 解析、错误文案）与 extension_control 一致。
+    let tab_id = session_tab_id(state, &session_key).await?;
+    let mut body = serde_json::Map::new();
+    body.insert("cmd".to_string(), json!("inject"));
+    body.insert("tabId".to_string(), json!(parse_tab_id(&tab_id)?));
+    if let Value::Object(map) = payload {
+        for (key, value) in map {
+            body.insert(key, value);
+        }
+    }
+    let response = execute_raw_js_on_tab(
         state,
+        &Value::Object(body).to_string(),
         &session_key,
-        "inject",
-        payload,
         DEFAULT_EXTENSION_CONTROL_TIMEOUT,
     )
-    .await?;
-    // 扩展回的是 {ok, data}；这里把 data 提到顶层，避免 CLI 出现 result.result.data 三层。
-    Ok(value.get("data").cloned().unwrap_or(value))
+    .await
+    .map_err(|err| anyhow!(humanize_extension_error(&err.to_string())))?;
+    let mut value = response.data.or(response.result).unwrap_or(Value::Null);
+    // inject 正常只回对象；数组/标量一律判错。
+    if !value.is_object() {
+        return Err(anyhow!(
+            "invalid extension payload: inject 返回了非对象，期望对象 {{ok, ...}}"
+        ));
+    }
+    // 兼容旧扩展（回包没有 executed）：run 成功时补出字段，CLI 不用按扩展版本分支。
+    if action == "run"
+        && value.get("executed").is_none()
+        && value.get("ok").and_then(Value::as_bool) != Some(false)
+    {
+        let returned = value.get("value").cloned().unwrap_or(Value::Null);
+        value["executed"] = json!(true);
+        value["returned"] = returned.clone();
+        value["threw"] = Value::Null;
+        if value.get("value").is_none() {
+            value["value"] = returned;
+        }
+    }
+    let has_error = value
+        .get("error")
+        .map(|error| !error.is_null())
+        .unwrap_or(false);
+    let failed = value.get("ok").and_then(Value::as_bool) == Some(false) || has_error;
+    // 脚本已经执行后抛错（executed=true 且 threw 非空）保留完整结构，
+    // 交给 CLI 决定退出码；注入/编译阶段失败仍按 Err 返回（沿用退出码 1）。
+    let script_threw = value.get("executed").and_then(Value::as_bool) == Some(true)
+        && value
+            .get("threw")
+            .map(|threw| !threw.is_null())
+            .unwrap_or(false);
+    if failed && !script_threw {
+        let raw = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("extension command failed");
+        return Err(anyhow!(humanize_extension_error(raw)));
+    }
+    Ok(value)
 }
 
 /// `frames` 只需要定位标签：以前复用 `ReadRequest`（带 selector / max_chars /
@@ -641,7 +762,7 @@ pub(crate) async fn run_target_operation(
     finish_operation(state, tab_id, action, monitor, options).await
 }
 
-/// 「目标不存在」类错误：页面动作**从未落到 DOM 上**的失败（第 2 点配套判据）。
+// 「目标不存在」类错误：页面动作**从未落到 DOM 上**的失败。
 ///
 /// 只有这种失败可以安全地「重新定位 + 重试」：`page_action.js` 在 `__abcAct` 开头
 /// 就做 `querySelector`，命中不到时直接 `{ok:false, error:'target not found: ...'}`，
@@ -1145,7 +1266,7 @@ pub(crate) async fn retry_relocate_selector(
         Err(_) => return Ok(None),
     };
     {
-        // 写回前校验 generation/URL（第 3 点）：重定位期间有人重新 snapshot 或
+        // 写回前校验 generation/URL：重定位期间有人重新 snapshot 或
         // 页面导航，写回就会把新快照的 @e 指向错误节点。
         let mut driver = state.driver.write().await;
         write_back_relocated_selector(

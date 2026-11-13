@@ -171,10 +171,61 @@ const ERROR_CODE_HINTS: &[(&str, &str, bool)] = &[
         "输出文件已存在：换一个 --out，或设 ATB_IO_OVERWRITE=backup/force",
         false,
     ),
+    // 2026-11-13 改进轮新增。
+    (
+        "focus_failed",
+        "标签页切前台失败：先用 tabs --ids 确认标签仍存在；扩展过旧时重新加载扩展",
+        true,
+    ),
+    (
+        "permission_required",
+        "扩展未授权 management：打开扩展设置页 → 高级权限 → 授权读取扩展列表，然后重试 atb extensions",
+        false,
+    ),
+    (
+        "daemon_outdated",
+        "常驻 daemon 还是旧二进制：运行 atb restart 加载新路由后重试",
+        true,
+    ),
+    (
+        "syntax_error",
+        "脚本本地语法检查失败：按提示的行列修正；确认无误时用 --no-preflight 或 ATB_JS_CHECK=off 交给浏览器执行",
+        false,
+    ),
+    (
+        "inject_script_threw",
+        "脚本已执行但抛错：看 threw 字段；这是脚本自身异常，不是注入通道失败",
+        false,
+    ),
+    (
+        "unsupported_selector",
+        "该选择器形态不受支持：改用 find 拿到 CSS 选择器，或对 shadow DOM 用 host >>> inner",
+        false,
+    ),
+    (
+        "exec_result_not_found",
+        "exec 的迟到结果不存在或已过期：确认 exec_id；长任务可加大 ATB_EXEC_RESULT_TTL_SEC 或改用 --async + job wait",
+        true,
+    ),
+    (
+        "cdp_required",
+        "指定了 --require-cdp 但 CDP 不可用：页面可能被其它扩展 iframe 挡住，先关掉挡路扩展或去掉 --require-cdp",
+        false,
+    ),
+    (
+        "invalid_encoding",
+        "脚本文件不是 UTF-8：转成 UTF-8，或用 --file - 从 stdin 传入",
+        false,
+    ),
+    (
+        "script_file_too_large",
+        "脚本文件超过上限：拆分为多个 --file，或提高 ATB_SCRIPT_FILE_MAX_MB",
+        false,
+    ),
 ];
 
 /// 会把操作下发到扩展页面的命令：都可能收到 WS 下行通道的两类失败
-/// （背压 / 断连）。集中在这里补，避免每加一条页面命令都漏。
+// 。集中在这里补，避免每加一条页面命令都漏。
 const PAGE_OP_COMMANDS: &[&str] = &[
     "click",
     "mouse-click",
@@ -189,6 +240,7 @@ const PAGE_OP_COMMANDS: &[&str] = &[
     "snapshot",
     "read",
     "find",
+    "measure",
     "inject",
     "frames",
     "wait",
@@ -243,8 +295,35 @@ fn schema_entries() -> Vec<CmdSchema> {
             // Agent 照表传 `--limit 0` 会拿到空列表；这里改为无默认的可选整数。
             "--limit": opt("int"),
             "--mine": flag(),
+            // 2026-11-13：大浏览器过滤与流式输出。
+            "--url-contains": opt("string"),
+            "--title-contains": opt("string"),
+            "--filter": opt("string"),
+            "--format": with_enum("string", "json", &["json", "jsonl", "tsv"]),
         }),
         &["no_tabs", "invalid_api_token", "unsupported_flag"],
+    );
+    push(
+        "focus",
+        "把目标标签页切到前台；后台标签页会节流定时器/懒加载",
+        json!({
+            "--tab": opt("string"),
+            "--browser": opt("string"),
+            "--profile": opt("string"),
+            "--no-window": flag(),
+            "--timeout": with_default("number", json!(15.0)),
+        }),
+        &["target_not_found", "extension_outdated", "focus_failed"],
+    );
+    push(
+        "use",
+        "把当前智能体的默认目标固定到指定标签页",
+        json!({
+            "<target>": required("string"),
+            "--browser": opt("string"),
+            "--profile": opt("string"),
+        }),
+        &["target_not_found", "target_ambiguous"],
     );
     push(
         "tabtree",
@@ -347,6 +426,27 @@ fn schema_entries() -> Vec<CmdSchema> {
         &["no_tabs", "target_not_found", "target_out_of_range"],
     );
     push(
+        "measure",
+        "元素量测：rect / computed style / 可见性",
+        json!({
+            "--selector": required("string"),
+            "--styles": opt("string"),
+            "--with-text": flag(),
+            "--tab": opt("string"),
+            "--browser": opt("string"),
+            "--profile": opt("string"),
+            "--frame": opt("int"),
+            "--timeout": with_default("number", json!(30.0)),
+        }),
+        &[
+            "no_tabs",
+            "target_not_found",
+            "target_out_of_range",
+            "selector_not_found",
+            "unsupported_selector",
+        ],
+    );
+    push(
         "snapshot",
         "生成带 @e 引用的可点击树",
         merge_args(
@@ -384,9 +484,11 @@ fn schema_entries() -> Vec<CmdSchema> {
         merge_args(
             json!({
                 "<script>": with_default("string", json!("")),
-                "--file": opt("path"),
+                // 2026-11-13：--file 可重复，按顺序拼接；`-` 读 stdin。
+                "--file": variadic("path", false),
                 "--max-bytes": opt("number"),
-                // clap 侧只接受 main/isolated（大小写不敏感），表里必须
+                "--no-preflight": flag(),
+                // v11：clap 侧只接受 main/isolated（大小写不敏感），表里必须
                 // 同步 enum，否则 `atb schema` 会告诉 Agent「任意字符串都行」。
                 "--world": with_enum("string", "main", &["main", "isolated"]),
                 "--frame": opt("int"),
@@ -403,7 +505,7 @@ fn schema_entries() -> Vec<CmdSchema> {
             "invalid_frame",
             // 位置参数脚本与 --file 同时给。
             "unsupported_combination",
-            // 组合 wait 失败与受限页面必须能被调用方按码归类。
+            // ：组合 wait 失败与受限页面必须能被调用方按码归类。
             "wait_js_failed",
             // CONTRACT §3.2：页面禁 eval 时 daemon 回退 CDP，走到这里说明回退也失败。
             "wait_js_eval_blocked",
@@ -509,10 +611,41 @@ fn schema_entries() -> Vec<CmdSchema> {
                 "--match": variadic("string", false),
                 "--frame": opt("int"),
                 "--all-frames": flag(),
+                // 2026-11-13：用户脚本模式与持久注入安全阀。
+                "--userscript": flag(),
+                "--gm-namespace": opt("string"),
+                "--cleanup-selector": variadic("string", false),
+                "--cleanup-file": opt("path"),
+                "--ttl": opt("int"),
+                "--persist-forever": flag(),
+                "--i-know-this-is-long-lived": flag(),
+                "--no-preflight": flag(),
             }),
             page_args(30.0),
         ),
-        &["no_tabs", "target_not_found", "invalid_argument"],
+        &[
+            "no_tabs",
+            "target_not_found",
+            "invalid_argument",
+            "syntax_error",
+            "inject_script_threw",
+        ],
+    );
+    push(
+        "userscript",
+        "打开用户脚本安装页（Tampermonkey/Violentmonkey）",
+        json!({
+            "<source>": required("string"),
+            "--tab": opt("string"),
+            "--browser": opt("string"),
+            "--profile": opt("string"),
+            "--parse-only": flag(),
+        }),
+        &[
+            "file_not_found",
+            "invalid_encoding",
+            "unsupported_combination",
+        ],
     );
 
     // ---- 动作类（ActionArgs）----
@@ -559,6 +692,8 @@ fn schema_entries() -> Vec<CmdSchema> {
                 "--visible": flag(),
                 "--interval": with_default("number", json!(0.1)),
                 "--frame": opt("int"),
+                "--dom-stable": opt("int"),
+                "--network-idle": opt("int"),
             }),
             page_args(10.0),
         ),
@@ -604,7 +739,7 @@ fn schema_entries() -> Vec<CmdSchema> {
             "target_not_found",
             "challenge_blocked",
             "wait_timeout",
-            // 探测不可用与整条点击链超时。
+            // /：探测不可用与整条点击链超时。
             "challenge_probe_failed",
             "challenge_click_timeout",
             // CLI 侧把「超时未达成」改写成这个码（wait/solve 的终态判据）。
@@ -644,6 +779,7 @@ fn schema_entries() -> Vec<CmdSchema> {
             // --wait-for / --warm 与 --group-title 同批加入（open 体验改进），
             // schema 表必须同步，否则 Agent 会漏用这两个 flag。
             "--wait-for": opt("string"),
+            "--wait-for-timeout": opt("number"),
             "--warm": flag(),
         }),
         &[
@@ -729,6 +865,11 @@ fn schema_entries() -> Vec<CmdSchema> {
                 "--full-page": flag(),
                 // CDP 主路径与拼图回落都按此上限截断（超出回 truncated:true）。
                 "--max-height": opt("int"),
+                // 2026-11-13：截图前等待与禁止静默降级。
+                "--settle-ms": opt("int"),
+                "--wait-selector": opt("string"),
+                "--network-idle": opt("int"),
+                "--require-cdp": flag(),
             }),
             page_args(30.0),
         ),
@@ -736,15 +877,17 @@ fn schema_entries() -> Vec<CmdSchema> {
             "output_path_collision",
             "no_tabs",
             "target_not_found",
-            // 字节上限与调试器被占用。
+            // ：字节上限与调试器被占用。
             "capture_too_large",
             "debugger_blocked",
             "page_protected",
+            "wait_for_timeout",
+            "cdp_required",
         ],
     );
     push(
         "save-pdf",
-        // + `--max-height` 现在在常规 CDP 打印路径也生效（超出截断并回
+        // +：`--max-height` 现在在常规 CDP 打印路径也生效（超出截断并回
         // truncated:true），不再只是图片型回落时的旋钮。
         "把当前页面另存为 PDF（--max-height 限制输出高度，CDP 主路径与图片型回落均生效）",
         merge_args(
@@ -763,7 +906,7 @@ fn schema_entries() -> Vec<CmdSchema> {
             "output_path_collision",
             "no_tabs",
             "target_not_found",
-            // 超长页切片失败与输出字节上限。
+            // ：超长页切片失败与输出字节上限。
             "pdf_too_tall",
             "capture_too_large",
             "debugger_blocked",
@@ -813,11 +956,17 @@ fn schema_entries() -> Vec<CmdSchema> {
         "console",
         "抓取页面 console 输出",
         json!({
-            "<subcommand>": { "type": "enum", "required": true, "enum": ["start", "list", "clear", "stop"] },
+            "<subcommand>": { "type": "enum", "required": true, "enum": ["start", "list", "clear", "stop", "history", "tail"] },
             // 由反射测试补齐：同上，start/clear/stop 用 TabOnlyArgs，
             // list 另有 --level/--limit，旧表只写了 <subcommand>。
             "--level": opt("string"),
             "--limit": with_default("number", json!(100)),
+            // 2026-11-13：history/tail 的采样与过滤。
+            "--settle-ms": opt("int"),
+            "--types": opt("string"),
+            "--clear": flag(),
+            "--duration": with_default("number", json!(10.0)),
+            "--interval": with_default("number", json!(0.5)),
             "--tab": opt("string"),
             "--browser": opt("string"),
             "--profile": opt("string"),
@@ -916,7 +1065,7 @@ fn schema_entries() -> Vec<CmdSchema> {
         &[
             "no_tabs",
             "target_not_found",
-            // 文件名净化拒绝。
+            // ：文件名净化拒绝。
             "invalid_filename",
         ],
     );
@@ -948,18 +1097,22 @@ fn schema_entries() -> Vec<CmdSchema> {
         "job",
         "管理 --async 提交的后台任务",
         json!({
-            "<subcommand>": { "type": "enum", "required": true, "enum": ["list", "get", "wait", "cancel"] },
+            "<subcommand>": { "type": "enum", "required": true, "enum": ["list", "get", "wait", "cancel", "tail", "result"] },
             "<id>": optional("string"),
             // get / wait / cancel 必须带 <id>（list 不需要）。
             "<subcommand_args>": {
                 "list": { "--limit": with_default("number", json!(20)) },
                 "get": { "<id>": required("string") },
                 "wait": { "<id>": required("string"), "--timeout": with_default("number", json!(300.0)), "--interval": with_default("number", json!(0.3)) },
-                "cancel": { "<id>": required("string") }
+                "cancel": { "<id>": required("string") },
+                "tail": { "<id>": required("string"), "--timeout": with_default("number", json!(600.0)), "--interval": with_default("number", json!(0.5)), "--human": flag() },
+                "result": { "<id>": required("string"), "--wait": with_default("number", json!(5.0)), "--interval": with_default("number", json!(0.5)) }
             },
             "--timeout": opt("number"),
             "--limit": opt("number"),
             "--interval": opt("number"),
+            "--human": flag(),
+            "--wait": opt("number"),
         }),
         // 后台任务 panic 是 bug，不是超时；job get/wait 会看到该状态。
         &[
@@ -1037,6 +1190,37 @@ fn schema_entries() -> Vec<CmdSchema> {
             "port_mismatch",
             "extension_not_connected",
             "no_active_tabs",
+        ],
+    );
+    push(
+        "env",
+        "环境快照：浏览器/Profile/扩展/标签页/持久注入/警告一次拿齐",
+        json!({
+            "--browser": opt("string"),
+            "--profile": opt("string"),
+            "--tab": opt("string"),
+            "--tab-limit": with_default("int", json!(10)),
+        }),
+        &[
+            "daemon_not_running",
+            "daemon_token_mismatch",
+            "invalid_api_token",
+        ],
+    );
+    push(
+        "extensions",
+        "列出已安装扩展（需在扩展设置页授权 management 可选权限）",
+        json!({
+            "--browser": opt("string"),
+            "--profile": opt("string"),
+            "--include-disabled": flag(),
+            "--timeout": with_default("number", json!(15.0)),
+        }),
+        &[
+            "permission_required",
+            "extension_outdated",
+            "daemon_outdated",
+            "target_not_found",
         ],
     );
     push(
@@ -1348,7 +1532,7 @@ mod schema_reflection_tests {
     }
 
     // -----------------------------------------------------------------------
-    // 名称集合一致只是最低要求。
+    // ：名称集合一致只是最低要求。
     // 下面再逐项比对 default / type / enum / required / variadic / 位置参数，
     // 并断言命令总数；表里写错默认值（如 tabs --limit 默认 0）也会失败。
     // -----------------------------------------------------------------------
@@ -1402,7 +1586,7 @@ mod schema_reflection_tests {
             .collect()
     }
 
-    /// 表里声明的 error_codes 至少要覆盖这些「实际会发」的码。
+    // 表里声明的 error_codes 至少要覆盖这些「实际会发」的码。
     ///
     /// 无法在测试里静态推导 daemon 端会发哪些码，所以这里列出本轮新增/易漂移的
     /// 关键对；新增分支时应同步往这里加一行。
@@ -1433,11 +1617,11 @@ mod schema_reflection_tests {
             .collect();
         assert_eq!(
             entries.len(),
-            55,
-            "schema 表项数应为 55（新增命令需同步本断言）：{:?}",
+            61,
+            "schema 表项数应为 61（新增命令需同步本断言）：{:?}",
             entries.iter().map(|entry| entry.name).collect::<Vec<_>>()
         );
-        assert_eq!(clap_names.len(), 55, "clap 顶层命令数应为 55");
+        assert_eq!(clap_names.len(), 61, "clap 顶层命令数应为 61");
 
         let mut problems: Vec<String> = Vec::new();
 
@@ -1708,7 +1892,7 @@ mod schema_reflection_tests {
         }
     }
 
-    /// `--world` 只接受 main / isolated（大小写不敏感），非法值解析期 exit 2。
+    // v11：`--world` 只接受 main / isolated（大小写不敏感），非法值解析期 exit 2。
     ///
     /// exec 与 inject 都走扩展的 world 选择：自由字符串会被静默落成 MAIN，
     /// 用户以为切到了 isolated（不受页面 CSP 影响）其实没有。

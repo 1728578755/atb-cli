@@ -35,7 +35,7 @@ pub(crate) fn ws_trust_allows(trust: &WsTrust, extension_id: &str) -> bool {
             .any(|item| item.trim().eq_ignore_ascii_case(extension_id))
 }
 
-/// WS 握手信任档位（`ATB_WS_TRUST_MODE`）。
+// WS 握手信任档位。
 ///
 /// `Origin` 头是客户端自断言、可被本机任意进程伪造的，所以它只能当「像不像扩展」
 /// 的第一道筛子，不能当身份证明。真正的档位由用户在配置里显式选择：
@@ -74,7 +74,7 @@ pub(crate) fn parse_ws_trust_mode(raw: &str) -> WsTrustMode {
     }
 }
 
-/// 握手被拒绝时的结构化信息。`error_code` 稳定，供 CLI/ext 分支处理。
+// 握手被拒绝时的结构化信息。`error_code` 稳定，供 CLI/ext 分支处理。
 #[derive(Debug)]
 pub(crate) struct WsHandshakeReject {
     pub(crate) status: StatusCode,
@@ -313,7 +313,7 @@ pub(crate) fn query_param(query: Option<&str>, key: &str) -> Option<String> {
 /// **不**把裸 `+` 当空格：`+` 只在 `application/x-www-form-urlencoded` 的
 /// **请求体**里有空格含义，query 里的 `+` 是合法字面字符。以前这里把 `+`
 /// 解成空格，token 里带 `+` 且客户端没有 `encodeURIComponent` 时握手恒失败——
-/// 表现是「token 明明抄对了却 401」。真正的空格请用 `%20`。
+// 表现是「token 明明抄对了却 401」。真正的空格请用 `%20`。
 pub(crate) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -436,9 +436,9 @@ pub(crate) async fn ws_handler(
 /// 连接循环里只读一个 `AtomicBool`，不碰登记表锁（热路径无锁）。
 pub(crate) const WS_REVOKE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 入站静默检查的轮询间隔。
+// 入站静默检查的轮询间隔。
 pub(crate) const WS_INBOUND_CHECK_INTERVAL: Duration = Duration::from_secs(15);
-/// 允许的入站静默上限：超过即判定 TCP half-open。
+// 允许的入站静默上限：超过即判定 TCP half-open。
 ///
 /// 扩展每 30s 发一次 `{"type":"ping"}`，正常链路不可能连续 3 个周期一个字都不来。
 /// 旧实现收到 ping 直接 `continue`：既不回 pong，也不记录最后入站时间，更没有
@@ -449,7 +449,7 @@ pub(crate) const WS_INBOUND_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 /// 自愈优先），服务端这条 90s 硬超时是最后一道闸——两者阈值刻意错开，避免同时抖动。
 pub(crate) const WS_INBOUND_SILENCE_LIMIT: Duration = Duration::from_secs(90);
 
-/// 入站静默是否已构成「半开连接」（把判据抽成纯函数，便于直接单测）。
+// 入站静默是否已构成「半开连接」。
 ///
 /// 只比阈值不做任何 IO：连接循环里的定时分支与单测用**同一个**判据，
 /// 避免"测的和跑的不是一条线"。
@@ -460,15 +460,15 @@ pub(crate) fn inbound_is_half_open(silent: Duration) -> bool {
 /// 单条下行消息的发送上限。
 ///
 /// `socket.send(...).await` 在对端不读时会一直挂着（TCP 缓冲区满），所以它必须
-/// 带超时：超时即主动断开，扩展会按自己的重试节奏重连，比僵在这里好。
+// 带超时：超时即主动断开，扩展会按自己的重试节奏重连，比僵在这里好。
 ///
-/// 等待发送完成的这段时间**也**必须能被撤销打断——只把这个值当上限是不够的，
+/// S1-02：等待发送完成的这段时间**也**必须能被撤销打断——只把这个值当上限是不够的，
 /// 那意味着撤销最多被拖后 `WS_SEND_TIMEOUT` 才生效。实际实现在发送期间每
 /// `WS_REVOKE_POLL_INTERVAL`（500ms）查一次撤销位（见 `handle_socket`），
 /// 所以「撤销后 ≤500ms 断开」的承诺与实现一致；本值只是「对端一直不读」时的兜底上限。
 pub(crate) const WS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 发送 Close 帧，带超时。
+/// 发送 Close 帧，带超时（S1-01）。
 ///
 /// 撤销断开时旧实现直接 `socket.send(Message::Close(None)).await` 并把结果丢掉：对端不读
 /// （TCP 缓冲区满）时这一句会一直挂着，而连接循环已经准备退出，挂住的代价是
@@ -502,7 +502,7 @@ pub(crate) fn ws_connections_lock(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 单条连接的下行队列上限（`ATB_WS_OUTBOUND_MAX`，默认 512）。
+// 单条连接的下行队列上限。
 ///
 /// 值域 `8..=65536`：太小会让正常心跳被丢，太大失去「有界」的意义。
 /// 命令通道与 pong 通道各自独立，但共用一个上限：两条队列都只服务于
@@ -511,7 +511,7 @@ pub(crate) fn ws_outbound_max() -> usize {
     crate::settings::ws_outbound_max()
 }
 
-/// 等到队列入队成功的最长时间。
+// 等到队列入队成功的最长时间。
 ///
 /// 这个值不是「对端不读」的上限（那是 [`WS_SEND_TIMEOUT`]），而是「队列满时
 /// 业务侧愿意等多久」。取与发送同量级：再长会让调用方（HTTP handler）的
@@ -519,7 +519,7 @@ pub(crate) fn ws_outbound_max() -> usize {
 /// 批量下发会被误判成背压。
 pub(crate) const WS_OUTBOUND_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 把一条下行命令放进连接队列。
+// 把一条下行命令放进连接队列。
 ///
 /// 旧实现用 `mpsc::unbounded_channel`：扩展读得慢（大 snapshot / 卡住的标签页）时
 /// 命令在内存里无限堆积，daemon 只看到内存上涨，命令方也永远收不到「对端跟不上」。
@@ -574,7 +574,7 @@ pub(crate) fn new_ws_nonce() -> String {
     format!("{}{}", &first[..16], &second[..16])
 }
 
-/// 握手挑战帧（契约 §3.1）。
+// 握手挑战帧。
 ///
 /// daemon 先证明自己：`proof = HMAC-SHA256(key=ws-trust token, msg=nonce|extension_id)`。
 /// 扩展用本地 `wsToken` 复算并做恒定时间比较——本机进程即使抢占了扩展端口，
@@ -654,13 +654,13 @@ async fn send_text_guarded(
     }
 }
 
-/// 连接结束后的会话清理。
+// 连接结束后的会话清理。
 ///
 /// 从 `handle_socket` 末尾抽出来，既供正常路径 `await`，也供守卫在 panic 展开时
 /// spawn 兜底。只处理「确实属于这条连接」的会话：扩展重载时新旧连接会短暂并存，
 /// 旧连接晚一步收尾不能把新连接刚注册的会话标成断开再删掉。
 ///
-/// 连接代际 + 兜底：`session_key` 是确定性拼接，新连接重注册后会拿到
+// 连接代际 + 兜底：`session_key` 是确定性拼接，新连接重注册后会拿到
 /// **同一个 key**。判定因此是「`conn_id` 相等 **或**（`conn_id == 0` 且 sender 同通道）」：
 /// - `conn_id` 相等 = 显式代数匹配；
 /// - `conn_id == 0` 是 refresh 登记路径在「找不到连接」时的占位值，历史实现里这类
@@ -742,7 +742,7 @@ pub(crate) struct WsConnGuard {
 }
 
 impl WsConnGuard {
-    /// 幂等注销：连接循环一 break 就调用，别等函数末尾的 Drop。
+    // 幂等注销：连接循环一 break 就调用，别等函数末尾的 Drop。
     ///
     /// 旧实现把注销完全交给 Drop，`break` 之后还要排队做会话清理、`forget_session`、
     /// 向扩展发 debugClearAll……这整个异步窗口里死连接仍在 `ws_connections` 里，
@@ -759,7 +759,7 @@ impl Drop for WsConnGuard {
     }
 }
 
-/// 会话清理守卫：会话清理是异步的（driver/execs 都是 tokio 锁），
+// 会话清理守卫：会话清理是异步的（driver/execs 都是 tokio 锁），
 /// 没法放进 `Drop` 直接做，所以分两层：
 /// - 正常路径在 `handle_socket` 末尾显式 `cleanup_conn_sessions(...).await`，
 ///   成功后 `disarm()`；
@@ -827,7 +827,7 @@ pub(crate) async fn handle_socket(
     extension_id: String,
     conn_token_fp: Option<u64>,
 ) {
-    // 登记这条连接：`/reload-trust` 通过它把「握手时合法、之后被移出白名单
+    // 登记这条连接（N3-04）：`/reload-trust` 通过它把「握手时合法、之后被移出白名单
     // 或 token 收紧」的连接真正断开，而不是只在下次握手时才生效。
     let conn_id = state.ws_conn_seq.fetch_add(1, Ordering::Relaxed) as u64;
     let revoked = Arc::new(AtomicBool::new(false));
@@ -857,7 +857,7 @@ pub(crate) async fn handle_socket(
         },
     );
     // 注销靠 Drop：正常 break / 提前 return / panic 都不会漏。
-    // 正常路径在 break 后立刻显式 `unregister`（见循环之后），Drop 只是兜底。
+    // 正常路径在 break 后立刻显式 `unregister()`（见循环之后），Drop 只是兜底。
     let conn_guard = WsConnGuard {
         state: state.clone(),
         conn_id,
@@ -930,7 +930,7 @@ pub(crate) async fn handle_socket(
     // 首次 tick 立刻完成，等价于「进来就查一次」，不影响后续节奏。
     //
     // 外层循环带标号：发送分支里「超时 / 发送失败 / 被撤销」都要直接结束整条连接
-    // （普通 `break` 只会退出内层选择）。
+    // （普通 `break` 只会退出内层选择，S1-02）。
     'connection: loop {
         tokio::select! {
             Some(outgoing) = rx.recv() => {
@@ -1000,7 +1000,7 @@ pub(crate) async fn handle_socket(
                 let Message::Text(text) = msg else { continue; };
                 if is_app_ping(&text) {
                     // 回一条应用层 pong（旧实现直接 `continue`，扩展永远收不到回应，
-                    // 只能靠 HTTP 探活兜底）。pong 走独立的有界优先通道，
+                    // 只能靠 HTTP 探活兜底）。：pong 走独立的有界优先通道，
                     // 满时丢弃这一条（下个心跳周期会重发），绝不拖住命令下行。
                     let pong = json!({ "type": "pong" }).to_string();
                     if pong_tx.try_send(pong).is_err() {
@@ -1113,21 +1113,28 @@ pub(crate) fn should_set_default_session(driver: &DriverState, session_key: &str
     }
 }
 
-/// 迟到结果暂存的保留时间：5 分钟内可凭 exec_id 查回。
-pub(crate) const LATE_RESULT_TTL: Duration = Duration::from_secs(300);
+// 迟到结果暂存的保留时间。
+///
+/// 旧实现写死 300s（5 分钟）：长任务超时后，用户还没看到提示结果就过期了。
+/// 现在每次调用读取 `ATB_EXEC_RESULT_TTL_SEC`（默认 3600s，值域 60..86400），
+/// `GET /exec-result/:exec_id` 的 `ttl_seconds` 与清理判定同源。
+pub(crate) fn late_result_ttl() -> Duration {
+    Duration::from_secs(crate::settings::exec_result_ttl_sec())
+}
 /// 迟到结果暂存的兜底上限：防异常扩展灌爆内存，超出淘汰最旧一项。
 pub(crate) const LATE_RESULT_LIMIT: usize = 512;
 
-/// 把迟到结果/错误存入暂存表。
+// 把迟到结果/错误存入暂存表。
 ///
 /// 旧实现在 pending 已被超时/断开路径 take 掉之后收到扩展回包，直接静默丢弃：
-/// 调用方只知道「超时」，动作实际已执行成什么样永远查不到。暂存 5 分钟后，
-/// CLI 可凭错误信息里的 exec_id 用 `GET /exec-result/:id` 查回真实结果。
+/// 调用方只知道「超时」，动作实际已执行成什么样永远查不到。暂存后 CLI 可凭
+/// 错误信息里的 exec_id 用 `GET /exec-result/:id`（或 `atb job result`）查回。
 pub(crate) async fn store_late_result(state: &AppState, exec_id: &str, value: Value) {
     let mut late = state.late_results.lock().await;
     let now = Instant::now();
+    let ttl = late_result_ttl();
     // 顺带清理过期项。
-    late.retain(|_, (_, at)| now.duration_since(*at) < LATE_RESULT_TTL);
+    late.retain(|_, (_, at)| now.duration_since(*at) < ttl);
     // 兜底上限：HashMap 无序，按登记时间找最旧的一项淘汰。
     if late.len() >= LATE_RESULT_LIMIT && !late.contains_key(exec_id) {
         if let Some(oldest) = late
@@ -1146,7 +1153,7 @@ pub(crate) async fn store_late_result(state: &AppState, exec_id: &str, value: Va
 /// **锁约束（旧报告 #1 的死锁，防止回归）**：扩展的回包必须先进入这条消息循环
 /// 才能被处理，所以任何"持锁等回包"都是死锁。当前实现遵守：
 /// - `Ack` / `Result` / `Error` 只碰 `execs`（`state.execs`）与**同步**的
-///   `ws_connections` 登记表（代际比对），不碰 `driver`、不做跨任务等待；
+// `ws_connections` 登记表，不碰 `driver`、不做跨任务等待；
 /// - `driver` 锁只在 `apply_tabs_snapshot` 内短暂持有，持锁期间没有任何 await
 ///   外部回包（登记表合并也挪到了 drop 之后）；
 /// - 需要等结果的地方一律「取 sender → 释放 `driver` 锁 → 等 oneshot」
@@ -1244,8 +1251,9 @@ pub(crate) async fn handle_ws_message(
             } else {
                 // 迟到结果暂存：pending 不存在说明请求已被超时/断开路径
                 // take 掉（或 id 未知）。旧实现在这里静默丢弃——调用方只知道
-                // 「超时」，动作实际已执行成什么样永远查不到。现在暂存 5 分钟，
-                // CLI 可凭错误信息里的 exec_id 用 GET /exec-result/:id 查回。
+                // 「超时」，动作实际已执行成什么样永远查不到。现在按
+                // `late_result_ttl()` 暂存，CLI 可凭 exec_id 用 GET /exec-result/:id
+                // 或 `atb job result <exec_id>` 查回。
                 let mut value = json!({ "result": result.clone(), "error": Value::Null });
                 if let Some(tabs) = new_tabs.clone() {
                     value["newTabs"] = tabs;
@@ -1314,7 +1322,7 @@ pub(crate) async fn handle_ws_message(
             warnings,
             tabs,
         } => {
-            // 扩展自检信息以前被 serde 静默丢弃：最典型的是
+            // 扩展自检信息以前被 serde 静默丢弃（R-19）：最典型的是
             // 「queryTabs 失败 → 上报 0 个标签」，用户只看到「没有可用标签页」，
             // 完全不知道扩展自己已经报了错。留最近一次快照给 `/health` 展示。
             if !warnings.is_empty() {
@@ -1363,7 +1371,7 @@ pub(crate) async fn handle_ws_message(
     }
 }
 
-/// 这份 tabs 快照是否「明显不可信」。
+// 这份 tabs 快照是否「明显不可信」。
 ///
 /// 判据：**0 个标签 + 告警里确实有标签枚举失败**。
 ///
@@ -1397,7 +1405,7 @@ fn tab_enumeration_failed(warnings: &[Value]) -> bool {
     })
 }
 
-/// `ext_ready.restartSeq` 的线协议约定。
+// `ext_ready.restartSeq` 的线协议约定。
 ///
 /// 扩展侧 `background.js::ensureRestartSeq` 在每次 Service Worker 冷启动时把
 /// `chrome.storage.local.extRestartSeq` +1 并随 `ext_ready` 上报（读失败时上报 0）。
@@ -1409,7 +1417,7 @@ fn tab_enumeration_failed(warnings: &[Value]) -> bool {
 ///   扩展重启后浏览器侧拦截已失效，所以把该 profile 的配置标记
 ///   `cdpRebuildRequired`，下一次 `net route` / `net routes` 用 `start` 整体重下发；
 /// - network / console 抓取的 intent 从来不在 daemon（各自由 CLI 那条命令持有），
-///   daemon 没有可重建的状态，恢复由扩展侧自己完成（见扩展侧修复），
+// daemon 没有可重建的状态，恢复由扩展侧自己完成，
 ///   这里**不**假装重建。
 pub(crate) fn parse_restart_seq(text: &str) -> Option<(String, String, u32)> {
     let value: Value = serde_json::from_str(text).ok()?;

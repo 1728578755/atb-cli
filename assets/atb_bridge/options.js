@@ -53,6 +53,8 @@ async function init() {
   bindIdentity();
   bindCookies();
   bindAppearance();
+  bindDebugSettings();
+  bindAdvancedPermissions();
   bindDiagnostics();
   bindCopyButtons();
   bindLifecycle();
@@ -61,6 +63,7 @@ async function init() {
   fillBrowserInfo();
   void fillBuildStamp();
   await refreshStatus();
+  await refreshManagementPermission();
   if (activeSection === 'cookies') renderCookieTable();
   pollTimer = setInterval(() => {
     if (document.hidden) return;
@@ -240,6 +243,10 @@ function applyStatus(data, errorText) {
   renderAuthWarning(data);
   renderConnectError(data);
   renderDiagnostics(data);
+  // 没有 permissions API 时，用 status 里的 management_permission 兜底。
+  if (!(chrome.permissions && typeof chrome.permissions.contains === 'function')) {
+    renderManagementPermission(!!data.management_permission, true);
+  }
 }
 
 function setSidePill(kind, text) {
@@ -499,7 +506,8 @@ function renderCookieTable() {
     valueTd.className = 'cell-value' + (revealed ? '' : ' masked');
     const raw = cookie.value == null ? '' : String(cookie.value);
     valueTd.textContent = revealed ? raw : '•••';
-    valueTd.title = revealed ? '' : '点「显示值」并二次确认后查看';
+    // 表格列宽固定，值单行省略；title 保留完整内容，便于核对。
+    valueTd.title = revealed ? raw : '点「显示值」并二次确认后查看';
 
     const flagsTd = document.createElement('td');
     const flags = document.createElement('div');
@@ -685,6 +693,7 @@ function syncAppearanceControls(settings) {
     : 'standard';
   $('densitySelect').value = settings.uiDensity === 'compact' ? 'compact' : 'standard';
   $('badgeToggle').checked = settings.showBadge === true;
+  $('persistTtlSelect').value = String(ATB.normalizePersistTtl(settings.persistTtlSec));
 }
 
 function bindAppearance() {
@@ -745,7 +754,128 @@ function bindAppearance() {
       ttlSec = clampTtl(changed.clipboardTtlSec);
       if ($('cookieTtl')) $('cookieTtl').value = String(ttlSec);
     }
+    if (changed.persistTtlSec != null) {
+      $('persistTtlSelect').value = String(ATB.normalizePersistTtl(changed.persistTtlSec));
+    }
   });
+}
+
+/** 调试注入默认值：与 popup「设置 → 调试注入」共用 storage.persistTtlSec。 */
+function bindDebugSettings() {
+  $('persistTtlSelect')?.addEventListener('change', async (event) => {
+    const value = ATB.normalizePersistTtl(event.target.value);
+    event.target.value = String(value);
+    const ok = await ATB.writeSetting('persistTtlSec', value);
+    ATB.setMsg($('debugMsg'), ok ? `持久注入默认过期时间已保存（${formatPersistTtl(value)}）` : '保存失败：扩展存储不可用', ok ? 'ok' : 'err');
+  });
+}
+
+function formatPersistTtl(sec) {
+  if (sec >= 3600 && sec % 3600 === 0) return `${sec / 3600} 小时`;
+  return `${Math.round(sec / 60)} 分钟`;
+}
+
+// ---------------------------------------------------------------------------
+// 可选权限：management（只用于列出扩展）
+// ---------------------------------------------------------------------------
+
+function bindAdvancedPermissions() {
+  $('btnGrantManagement')?.addEventListener('click', grantManagementPermission);
+  // 用户也可能在 chrome://extensions 里撤销/重新授予；两个方向都刷新状态。
+  try {
+    chrome.permissions?.onAdded?.addListener(() => { void refreshManagementPermission(); });
+    chrome.permissions?.onRemoved?.addListener(() => { void refreshManagementPermission(); });
+  } catch (_) {}
+}
+
+/**
+ * 查询 management 授权状态。正常走 chrome.permissions.contains；
+ * 没有 permissions API 时退回 status 的 management_permission 字段。
+ */
+async function refreshManagementPermission() {
+  let known = false;
+  let granted = false;
+  try {
+    if (chrome.permissions && typeof chrome.permissions.contains === 'function') {
+      granted = await chrome.permissions.contains({ permissions: ['management'] });
+      known = true;
+    }
+  } catch (_) {
+    known = false;
+  }
+  if (!known && lastStatus) {
+    granted = !!lastStatus.management_permission;
+    known = true;
+  }
+  renderManagementPermission(granted, known);
+  return granted;
+}
+
+function renderManagementPermission(granted, known) {
+  const pill = $('mgmtPermPill');
+  const text = $('mgmtPermText');
+  const button = $('btnGrantManagement');
+  if (!pill || !text) return;
+  if (!known) {
+    pill.className = 'pill';
+    text.textContent = '检测中';
+    if (button) {
+      button.disabled = false;
+      button.textContent = '授权读取扩展列表';
+    }
+    return;
+  }
+  if (granted) {
+    pill.className = 'pill ok';
+    text.textContent = '已授权';
+    if (button) {
+      button.disabled = true;
+      button.textContent = '已授权';
+    }
+    return;
+  }
+  pill.className = 'pill warn';
+  text.textContent = '未授权';
+  if (button) {
+    button.disabled = false;
+    button.textContent = '授权读取扩展列表';
+  }
+}
+
+async function grantManagementPermission() {
+  const button = $('btnGrantManagement');
+  if (!button || button.disabled) return;
+  if (!chrome.permissions || typeof chrome.permissions.request !== 'function') {
+    ATB.setMsg($('mgmtPermMsg'), '当前浏览器不支持 chrome.permissions，无法在页面里授权；请在 chrome://extensions 的扩展详情里手动开启 management 权限。', 'err');
+    return;
+  }
+  button.disabled = true;
+  button.textContent = '等待授权…';
+  try {
+    // 必须由用户点击同步触发；成功返回 true，用户拒绝返回 false。
+    const granted = await chrome.permissions.request({ permissions: ['management'] });
+    if (granted) {
+      renderManagementPermission(true, true);
+      // MV3 的 Service Worker 在权限授予前已经缓存了「management 不可用」；
+      // 不重载扩展时后台的 getAll 仍会报权限错误（实测）。
+      // 这里自动重载一次，让 atb extensions 立刻可用。
+      ATB.setMsg(
+        $('mgmtPermMsg'),
+        '已授权，正在重新加载扩展以启用 management API；页面会自动刷新，随后可运行 atb extensions。',
+        'ok',
+      );
+      ATB.toast('已授权 management，正在重载扩展', 'ok');
+      setTimeout(() => {
+        try { chrome.runtime.reload(); } catch (_) {}
+      }, 900);
+    } else {
+      renderManagementPermission(false, true);
+      ATB.setMsg($('mgmtPermMsg'), '未授权：你拒绝了授权请求，或企业策略禁止 management 权限。可以稍后重试。', 'err');
+    }
+  } catch (e) {
+    renderManagementPermission(false, true);
+    ATB.setMsg($('mgmtPermMsg'), '授权失败：' + ATB.friendlyError(e) + '（常见原因是用户拒绝或企业策略限制）', 'err');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -909,16 +1039,19 @@ function renderAbout() {
   const list = $('permList');
   if (!list) return;
   list.textContent = '';
-  const perms = Array.from(new Set([...(manifest.permissions || []), ...(manifest.host_permissions || [])]));
+  const required = Array.from(new Set([...(manifest.permissions || []), ...(manifest.host_permissions || [])]));
+  const optional = Array.from(new Set(manifest.optional_permissions || []));
+  const perms = [...required.map((perm) => ({ perm, optional: false })), ...optional.map((perm) => ({ perm, optional: true }))];
   if (!perms.length) {
     const li = document.createElement('li');
     li.textContent = 'manifest 没有返回权限清单';
     list.appendChild(li);
     return;
   }
-  for (const perm of perms) {
+  for (const { perm, optional: isOptional } of perms) {
     const li = document.createElement('li');
-    li.textContent = perm;
+    li.textContent = isOptional ? `${perm}（可选）` : perm;
+    if (isOptional) li.title = '可选权限：由用户在「高级权限」里手动授权，未授权时不影响其它功能';
     list.appendChild(li);
   }
 }

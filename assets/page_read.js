@@ -150,7 +150,7 @@ function __abcRead(opts) {
     return /current-password|new-password|cc-number|cc-csc|one-time-code/.test(autocomplete);
   }
 
-  /// 派生文本掩码（收口）：口径与 page_find.js 的 __abcMaskDerived
+  // 派生文本掩码：口径与 page_find.js 的 __abcMaskDerived
   /// 逐字对齐（三份文件各留一份、各叫各的名字，见 page_action.js 头部的命名约定）。
   ///
   /// 只掩码 placeholder 这类可能夹带半明文的**派生文本**：表单字段的 `name` 是站点

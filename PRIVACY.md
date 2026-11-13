@@ -1,6 +1,6 @@
 # 隐私说明
 
-适用于 `atb` 命令行工具（npm 包 `@g1728578755/atb`）与配套 Chrome 扩展 **ATB**（扩展文件版本 5.4.2）。
+适用于 `atb` 命令行工具（npm 包 `@g1728578755/atb`）与配套 Chrome 扩展 **ATB**（扩展文件版本 5.5.0）。
 
 安全边界与威胁模型见 [SECURITY.md](./SECURITY.md)；外部来源与依赖许可见 [SOURCES.md](./SOURCES.md)。
 
@@ -36,7 +36,8 @@ atb CLI（每次命令一个进程）
 | `~/.atb/net-hooks.json` | 按 `browser:profile` 存的网络规则 | daemon 重启后恢复 `net` 规则 | 删除即清空规则 |
 | `~/.atb/agent-tabs.json` | 智能体名到标签页的映射 | 多智能体互不串台 | 删除即清空分配记录 |
 | `~/.atb/logs/daemon.log` | daemon 运行日志（文件 0600、目录 0700） | 排查连接与命令失败 | 删除后下次运行重建 |
-| 浏览器扩展存储 | 扩展与 profile 标识、扩展端口、握手 token、角标开关、最后连接错误、自检状态、持久化注入脚本；`storage.session` 放请求去重（60 秒终态账本）与调试会话恢复等短期状态 | 多浏览器识别、弹窗诊断、刷新后重放注入 | 卸载扩展即删除 |
+| `~/.atb/banner.json` | 只存 `{agent, browser, at}`（当前 agent、可读浏览器名、上次提示时间） | `ATB_BROWSER_BANNER=once` 时避免重复提示「正在操作哪个浏览器」 | 删除后下次命令重新提示一次 |
+| 浏览器扩展存储 | 扩展与 profile 标识、扩展端口、握手 token、角标开关、`persistTtlSec`（持久注入默认寿命）、`persistInjections`（脚本、`matches`、`createdAt`、`expiresAt`）、最后连接错误、自检状态；`storage.session` 放请求去重（60 秒终态账本）与调试会话恢复等短期状态 | 多浏览器识别、弹窗诊断、刷新后重放注入 | 卸载扩展即删除 |
 
 扩展存储在 Chrome 的扩展数据目录内，不在 `~/.atb`。`storage.session` 的数据随浏览器退出清空。
 
@@ -60,14 +61,17 @@ atb CLI（每次命令一个进程）
 | 网络请求与响应 | `chrome.debugger` 或页面 hook | `net hook` / `net log` / `network` 系列 |
 | 控制台输出 | 页面与 `chrome.debugger` | `console start` 期间 |
 | 下载记录与文件 | `chrome.downloads` | `downloads` / `download` / `download-wait` |
-| 标签页、标签组、窗口 | `chrome.tabs`、`chrome.tabGroups` | `tabs` / `tabtree` / `open` / `close` / `cleanup` |
-| 扩展自身重载 | `chrome.management`（已移除） | 当前版本用扩展自身的 `chrome.runtime.reload()` 与 daemon 的版本提示，不再申请该权限 |
+| 标签页、标签组、窗口 | `chrome.tabs`、`chrome.tabGroups` | `tabs` / `tabtree` / `open` / `close` / `cleanup` / `focus` |
+| 已安装扩展列表 | `chrome.management.getAll`（**optional** 权限） | 仅在你于扩展设置页「关于 → 高级权限」手动授权后，`atb extensions` 只读列名/版本/启用状态；不启用、停用、卸载或修改任何扩展 |
+| 扩展自身重载 | 扩展自身的 `chrome.runtime.reload()` 与部署指纹（`.atb-build.json`） | 部署新版本后自动/手动重载；不读取其它扩展的配置 |
 
 页面数据只在 CLI（或经 CLI 转发的 Agent）主动下发命令时读取；扩展自身的管理与重载可能由 daemon 自动触发。扩展不会自行采集或外发页面内容。
 
 **页面正文默认不落盘**：常规命令只在内存里组装响应，退出即丢。唯一的例外是你显式开启 `ATB_IDEMPOTENCY_PERSIST=full`：此时幂等记录会把响应体写进 `~/.atb/idempotency.jsonl`，单条上限 256KB、TTL 60 秒，并且该文件不在任何上传/同步路径上。默认的 `redacted` 档只写键、范围、时间与状态。除此之外本地留存的是连接配置、扩展/Profile 标识、诊断状态，以及你显式要求持久化的注入脚本。
 
-扩展声明的完整权限列表以 `assets/atb_bridge/manifest.json` 为准（当前为 `cookies` / `tabs` / `tabGroups` / `activeTab` / `debugger` / `scripting` / `alarms` / `storage` / `declarativeNetRequest` / `webNavigation` / `downloads`）。`declarativeNetRequest` 只用于启动时清理历史 CSP 规则。
+扩展声明的完整权限列表以 `assets/atb_bridge/manifest.json` 为准（当前必需为 `cookies` / `tabs` / `tabGroups` / `activeTab` / `debugger` / `scripting` / `alarms` / `storage` / `declarativeNetRequest` / `webNavigation` / `downloads`；`management` 只作为 **optional_permissions**，默认不授予）。`declarativeNetRequest` 只用于启动时清理历史 CSP 规则。
+
+**用户脚本的 GM 存储**：`inject --userscript` 提供最小 GM shim，`GM_setValue` / `GM_getValue` 把键值写进**当前页面自己的 `localStorage`**，键前缀是 `__atb_gm__:<namespace>:`（namespace 只保留 `[A-Za-z0-9._-]`，默认 `atb-userscript`）。它随站点 origin 存在、页面脚本可读，也会随站点数据一起被清除；不会写到 `chrome.storage`，不会上传。`GM_xmlhttpRequest` 明确不支持，不会替你发跨域请求。`GM_addStyle` / `GM_registerMenuCommand` 只影响当前页面 DOM。
 
 ## 不收集、不上传
 
@@ -93,7 +97,9 @@ daemon 日志以排查为目的，可能记录：URL、错误码、错误上下�
 - `atb cookies --clear`：清除当前标签页 URL 下的 Cookie；加 `--domain` 指定域。会退出相关网站的登录状态。
 - 扩展 popup 的 Cookie 值默认是 `•••`，必须点「显示值」并在 5 秒内二次确认才会渲染；「复制 cookies」写入剪贴板后 30 秒自动清除（popup 里可调到 30–300 秒），离开页面时再清一次。
 - 断开扩展：在扩展弹窗里断开，或直接禁用/卸载扩展。
-- 删除 `~/.atb` 整个目录：清掉配置、token、信任配置、幂等记录、规则、分配记录与日志。
+- 撤销 `management`：扩展设置页「关于 → 高级权限」可撤销；撤销后 `atb extensions` 返回 `permission_required`，其它命令不受影响。
+- 清掉用户脚本的 GM 存储：清除对应站点的站点数据（`localStorage`）即可；atb 不额外保留副本。
+- 删除 `~/.atb` 整个目录：清掉配置、token、信任配置、幂等记录、规则、分配记录、banner 状态与日志。
 - 卸载扩展：删除扩展本地存储，包括标识与持久化注入脚本。
 
 ## 第三方
@@ -112,7 +118,11 @@ daemon 日志以排查为目的，可能记录：URL、错误码、错误上下�
 
 There is no telemetry, no analytics, no ads, no remote configuration and no remote code; everything ships inside the package.
 
-Local state lives in `~/.atb` (`config.json`, `api-token`, `ws-trust.json`, `idempotency.jsonl`, `net-hooks.json`, `agent-tabs.json`, `logs/daemon.log`) plus the extension's own browser storage. `api-token`, `ws-trust.json` and `daemon.log` are 0600 inside a 0700 directory (Windows ACL for the token files).
+Local state lives in `~/.atb` (`config.json`, `api-token`, `ws-trust.json`, `idempotency.jsonl`, `net-hooks.json`, `agent-tabs.json`, `banner.json`, `logs/daemon.log`) plus the extension's own browser storage. `api-token`, `ws-trust.json` and `daemon.log` are 0600 inside a 0700 directory (Windows ACL for the token files). `banner.json` stores only the agent name, readable browser name and timestamp, and only when `ATB_BROWSER_BANNER=once` needs to avoid repeating the notice.
+
+The `management` permission is **optional**: it is only used by `atb extensions` to read the installed-extension list after you explicitly authorize it in the extension settings, and the command is read-only.
+
+The GM shim used by `inject --userscript` stores `GM_*` values in the page's own `localStorage` under the `__atb_gm__:<namespace>:` prefix; it never writes those values to `chrome.storage` or uploads them. `GM_xmlhttpRequest` is not supported.
 
 Browser data (cookies including `httpOnly`, page DOM, network traffic, console output, downloads, tabs) is touched only when you run a command.
 

@@ -1,4 +1,4 @@
-// 收口轮 · 扩展域回归。
+// 轮 · 扩展域回归。
 //
 // 扩展运行时没有构建步骤、也无法在 CI 里起真实 Chrome，所以这里走两条路：
 //   1) 能在 Node 里真跑的（节流排队、命令账本）就抽出函数体真跑；
@@ -117,7 +117,7 @@ test('token 模式下 onopen 只启动鉴权等待，ext_ready 统一由 sendExt
   assert.match(sendExtReady, /finally\s*\{[\s\S]*?type:\s*'ext_ready'/, 'ext_ready 仍必须在 finally 里保证发出一次');
 });
 
-test('ws_hello 校验：HMAC-SH56 + 恒定时间比较 + 5s 超时', () => {
+test('ws_hello 校验：HMAC-SHA256 + 恒定时间比较 + 5s 超时', () => {
   const hello = extractFn(BG, 'handleDaemonAuthHello');
   assert.ok(hello, '缺少 handleDaemonAuthHello');
   assert.match(hello, /hmacSha256Hex\(\s*wsToken\s*,\s*`\$\{nonce\}\|\$\{chrome\.runtime\.id\}`\s*\)/,
@@ -352,7 +352,7 @@ test('命令账本：等不到终态时超时兜底，running 条目不被 TTL �
 });
 
 // ---------------------------------------------------------------------------
-// 锁序与恢复记忆
+// ：锁序与恢复记忆
 // ---------------------------------------------------------------------------
 
 test('锁序：enableFetchInterception 内不再落盘，persist 提到 tab 锁外', () => {
@@ -388,7 +388,7 @@ test('断线后 debugRestorePromise 作废，重连会重跑恢复', () => {
 });
 
 // ---------------------------------------------------------------------------
-// UI： / 与 回归
+// UI 与重连回归
 // ---------------------------------------------------------------------------
 
 test('cookie 取标签口径收敛到 ui/common.js，popup 页面模式复用', () => {
@@ -421,7 +421,7 @@ test('options 概览区「打开弹窗页面」按钮已接线', () => {
     '点击后必须有可见反馈');
 });
 
-test('popup 的 toastMsg 适配层存在（不得回退）', () => {
+test('popup 的 toastMsg 适配层存在', () => {
   const popup = readExt('popup.js');
   const common = readExt('ui/common.js');
   assert.match(common, /setMsg,/, 'ui/common.js 仍应导出 setMsg');
@@ -438,7 +438,7 @@ test('popup 的 toastMsg 适配层存在（不得回退）', () => {
 // known-answer：扩展的 WebCrypto HMAC 必须与 daemon（src/hmac.rs）逐字节一致
 // ---------------------------------------------------------------------------
 
-test('HMAC-SH56 已知答案与 daemon 对拍向量一致', async () => {
+test('HMAC-SHA256 已知答案与 daemon 对拍向量一致', async () => {
   const sandbox = { crypto: webcrypto, TextEncoder, Promise, Uint8Array };
   vm.runInNewContext(`${extractFn(BG, 'hmacSha256Hex')}\nthis.hmac = hmacSha256Hex;`, sandbox);
 

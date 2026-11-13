@@ -84,7 +84,7 @@ pub(crate) async fn cleanup(
         let task_key = key.clone();
         let handle = set.spawn(with_agent(current_agent(), async move {
             let key = task_key;
-            // 同类：拿不到许可就明确失败，不要「无许可继续跑」。
+            // S1-05 同类：拿不到许可就明确失败，不要「无许可继续跑」。
             let _permit = match permits.acquire_owned().await {
                 Ok(permit) => permit,
                 Err(err) => {
@@ -189,7 +189,7 @@ async fn record_cleanup_closed(state: &AppState, session_key: &str) {
     clear_agent_defaults_for(state, session_key).await;
 }
 
-/// 记账前置：在**发出 closeTab 之前**就把这条会话从
+// 记账前置：在**发出 closeTab 之前**就把这条会话从
 /// 「本工具打开过」和各 agent 的默认目标里摘掉。
 ///
 /// `cleanup` 有整体预算，到点 `drop(set)` 会 abort 在途任务：关闭指令可能已经发出，
@@ -232,7 +232,7 @@ async fn mark_session_closing(state: &AppState, session_key: &str) -> Vec<String
 /// closeTab 明确失败时把归属还回去（记账前置的可回滚面）。
 ///
 /// 不回滚会让「标签还在、但账上已经没有」——下一次 cleanup 再也清不掉它。
-/// 任务被 abort 走不到这里，那正是 允许的残留（由快照收敛）。
+// 任务被 abort 走不到这里，那正是 TA 允许的残留（由快照收敛）。
 async fn restore_session_ownership(state: &AppState, session_key: &str, owners: &[String]) {
     let mut opened = state.agent_opened.lock().await;
     for agent in owners {
@@ -247,7 +247,7 @@ async fn restore_session_ownership(state: &AppState, session_key: &str, owners: 
 pub(crate) async fn close_session_by_key(state: &AppState, session_key: &str) -> Result<()> {
     let physical_tab_id = session_tab_id(state, session_key).await?;
     let physical_tab_number = require_tab_id(&physical_tab_id)?;
-    // 先把记账落下，再发关闭指令。
+    // TA：先把记账落下，再发关闭指令。
     let previous_owners = mark_session_closing(state, session_key).await;
     let payload = json!({ "cmd": "closeTab", "tabId": physical_tab_number }).to_string();
     if let Err(err) = execute_page_js(
@@ -383,7 +383,7 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Value> {
             "profiles": profile_capabilities
         },
         "extension": extension_freshness,
-        // 扩展自检报错：非空就说明它那边已经有功能降级了，
+        // 扩展自检报错（R-19）：非空就说明它那边已经有功能降级了，
         // 比让用户盯着「没有可用标签页」猜要直接得多。
         "extension_warnings": state.ext_warnings.lock().await.clone(),
         "compatibility": compatibility,
@@ -463,16 +463,63 @@ pub(crate) async fn reload_trust(State(state): State<AppState>) -> Json<Value> {
     }
 }
 
-/// `/tabs` 查询参数的扩展包装：`TabsQuery` 在共享 DTO 里（dto.rs），本轮只为加一个
-/// `mine` 用 serde(flatten) 包一层，旧字段语义与命名完全不变。
+/// `/tabs` 查询参数的扩展包装：`TabsQuery` 在共享 DTO 里（dto.rs），本轮用
+/// serde(flatten) 包一层追加过滤参数，旧字段语义与命名完全不变。
 #[derive(Debug, Deserialize)]
 pub(crate) struct TabsQueryExt {
     #[serde(flatten)]
     pub(crate) inner: TabsQuery,
-    /// 只返回本 agent 通过 `open` 打开的标签页。
+    // 只返回本 agent 通过 `open` 打开的标签页。
     /// 旧实现 tabs 混着用户自己开的页面，智能体按列表挑清理目标会误伤。
-    #[serde(default)]
+    ///
+    /// flatten 路径上的 bool 会以字符串到达（见 dto.rs::de_boolish）。
+    #[serde(default, deserialize_with = "de_boolish")]
     pub(crate) mine: bool,
+    // 只保留 URL 含该子串的标签页（大小写不敏感）。。
+    #[serde(default, alias = "urlContains")]
+    pub(crate) url_contains: Option<String>,
+    // 只保留标题含该子串的标签页（大小写不敏感）。。
+    #[serde(default, alias = "titleContains")]
+    pub(crate) title_contains: Option<String>,
+    /// `--url-contains` / `--title-contains` 的简短别名：URL 或标题任一命中即可。
+    #[serde(default)]
+    pub(crate) filter: Option<String>,
+}
+
+/// 大小写不敏感的子串匹配；空子串等同「不过滤」。
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    needle.is_empty() || haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+// `/tabs` 的过滤谓词。
+///
+/// 三个条件同时给时是 **AND** 关系；`filter` 自身是「URL 或标题命中」的 OR。
+/// 放在 daemon 侧、字段映射之前执行，保证 `tabs_total` / `filtered` 与最终
+/// 输出基于同一份数据。
+pub(crate) fn tab_matches_filters(
+    tab: &TabInfo,
+    url_contains: Option<&str>,
+    title_contains: Option<&str>,
+    filter: Option<&str>,
+) -> bool {
+    let url_ok = url_contains
+        .map(|needle| contains_ci(&tab.url, needle))
+        .unwrap_or(true);
+    let title_ok = title_contains
+        .map(|needle| contains_ci(&tab.title, needle))
+        .unwrap_or(true);
+    let filter_ok = filter
+        .map(|needle| contains_ci(&tab.url, needle) || contains_ci(&tab.title, needle))
+        .unwrap_or(true);
+    url_ok && title_ok && filter_ok
+}
+
+/// 大列表提示：过滤后仍超过 `ATB_TABS_LARGE_WARNING` 时给一条可执行的收敛建议。
+pub(crate) const TABS_LARGE_SUGGEST: &str =
+    "--fields tab_id,title,url --limit 20 或 --url-contains <子串> 可显著缩小输出";
+
+pub(crate) fn tabs_large_suggest(filtered: usize) -> Option<&'static str> {
+    (filtered > crate::settings::tabs_large_warning()).then_some(TABS_LARGE_SUGGEST)
 }
 
 pub(crate) async fn tabs(
@@ -509,6 +556,10 @@ pub(crate) async fn tabs(
     .await
     {
         Ok(tabs) => {
+            // 过滤在 daemon 侧、字段映射之前完成。`tabs_total` 是过滤前
+            // 数量，`filtered` 是 mine + 子串条件叠加后的数量；两者都比对同一份快照，
+            // 调用方能直接看出「列表短了是因为过滤还是因为浏览器真的没标签」。
+            let tabs_total = tabs.len();
             let items: Vec<Value> = tabs
                 .iter()
                 // mine=true 时只留本 agent open 过的；会话没有登记（用户手开的、
@@ -519,18 +570,38 @@ pub(crate) async fn tabs(
                         .map(|keys| keys.contains(&tab.session_key))
                         .unwrap_or(true)
                 })
+                .filter(|tab| {
+                    tab_matches_filters(
+                        tab,
+                        query.url_contains.as_deref(),
+                        query.title_contains.as_deref(),
+                        query.filter.as_deref(),
+                    )
+                })
                 .map(|tab| tabs_display_json(tab, query.inner.full))
                 .collect();
+            let filtered = items.len();
+            let suggest = tabs_large_suggest(filtered);
             let mut metadata = if items.is_empty() {
-                // 空列表几乎总是「扩展还没连上」而不是「浏览器真的没开」：
-                // 直接把下一步说出来，比让智能体对着空数组猜要省一轮排障。
-                // 旧实现一句 warning 盖住「桥断 / 真没标签」两种病因；
-                // 补 warning_code + retryable，调用方可按码决定等待重试还是 open。
-                // mine=true 的空列表是过滤语义（本 agent 没打开过），不做桥判定。
-                if query.mine {
+                if tabs_total > 0 {
+                    // 有标签、但被 mine 或子串条件全部过滤掉：不能再报「浏览器没标签」，
+                    // 否则智能体会去重启浏览器而不是放宽过滤条件。
                     json!({
                         "tabs_count": 0,
                         "tabs": items,
+                        "tabs_total": tabs_total,
+                        "filtered": 0,
+                        "warning": "没有标签页匹配过滤条件",
+                        "warning_code": "no_matching_tabs",
+                        "retryable": false,
+                        "hint": "放宽 --url-contains / --title-contains / --filter，或去掉 --mine 后重试",
+                    })
+                } else if query.mine {
+                    json!({
+                        "tabs_count": 0,
+                        "tabs": items,
+                        "tabs_total": 0,
+                        "filtered": 0,
                         "warning": "本 agent 没有打开过（或打开的标签页都已关闭）",
                         "hint": "确认 Chrome 已打开且扩展已连接（status）；或先 open 一个页面。扩展重连最长约 30-60 秒",
                     })
@@ -546,6 +617,8 @@ pub(crate) async fn tabs(
                     let mut metadata = json!({
                         "tabs_count": 0,
                         "tabs": items,
+                        "tabs_total": 0,
+                        "filtered": 0,
                         "warning": "当前没有可操作标签页",
                         "warning_code": warning_code,
                         "retryable": retryable,
@@ -557,7 +630,18 @@ pub(crate) async fn tabs(
                     metadata
                 }
             } else {
-                json!({ "tabs_count": items.len(), "tabs": items })
+                let mut metadata = json!({
+                    "tabs_count": items.len(),
+                    "tabs": items,
+                    "tabs_total": tabs_total,
+                    "filtered": filtered,
+                });
+                // 只增字段：大列表给一条收敛建议。daemon 不知道 CLI 侧有没有传
+                // `--fields` / `--limit`（那是纯客户端参数），由 CLI 在裁剪时摘掉。
+                if let Some(suggest) = suggest {
+                    metadata["suggest"] = json!(suggest);
+                }
+                metadata
             };
             if query.mine {
                 // 回显过滤条件：智能体看到 mine:true 才知道列表不是全量。
@@ -616,7 +700,7 @@ pub(crate) async fn tabtree(
     touch(&state).await;
     // 只读命令：浏览器没开时用短等待，别再白等 5 秒。
     wait_for_sessions(&state, WAIT_SESSIONS_READ).await;
-    // 与 `tabs` 一样先对齐一次快照。旧实现直接读内存表，扩展推送延迟
+    // TA：与 `tabs` 一样先对齐一次快照。旧实现直接读内存表，扩展推送延迟
     // （SW 被节流时可达十几秒）会让 tabtree 显示一棵过期的树；刷新失败就用现有
     // 快照（不阻塞、不报错）。
     let _ = refresh_tabs_via_extension(&state, None, Duration::from_millis(1500)).await;
@@ -707,7 +791,7 @@ pub(crate) async fn tabtree(
             let mut profile_nodes: Vec<Value> = profiles
                 .into_iter()
                 .map(|(profile_id, mut sessions)| {
-                    // 与 `tabs` / `--tab @N` 共用同一判据（数值序，tab id 是
+                    // TA：与 `tabs` / `--tab @N` 共用同一判据（数值序，tab id 是
                     // Chrome 递增整数）。旧实现按字符串排序，`10` 会排在 `9` 前面，
                     // 于是 tabtree 的序号和 tabs 的序号指向不同标签。
                     sessions.sort_by(|a, b| {
@@ -1037,7 +1121,7 @@ pub(crate) async fn set_profile_label(
 /// **`parse_tab_id("")` 返回 `Err`（`session_gone` 语义），不再返回 `Ok(0)`**：
 /// 只有「这条命令根本不需要 tabId」的路径（`exec` 等）才在更上层跳过调用，
 /// 一旦走到这里，空串就说明会话记录已经坏了。旧注释写成「空串返回 Ok(0)」，
-/// 与实现相反，照着注释改代码会把 `tabId:0` 发给扩展，错误归因也被带偏。
+// 与实现相反，照着注释改代码会把 `tabId:0` 发给扩展，错误归因也被带偏。
 /// 关闭标签时必须落到具体 tabId，所以在入口再拦一次并给 typed `session_gone`。
 pub(crate) fn require_tab_id(raw: &str) -> Result<i64> {
     if raw.trim().is_empty() {
@@ -1232,7 +1316,26 @@ async fn send_profile_label_to_extension(
 mod regression_tests {
     use super::*;
 
-    /// `parse_tab_id("")` 的契约是「空串 = 会话已失效」，返回 `Err`。
+    fn sample_tab(url: &str, title: &str) -> TabInfo {
+        TabInfo {
+            id: "id".to_string(),
+            window_id: Some(1),
+            tab_id: "7".to_string(),
+            browser_id: "browser".to_string(),
+            profile_id: "profile".to_string(),
+            profile_label: None,
+            browser_label: None,
+            session_key: "browser:profile:7".to_string(),
+            url: url.to_string(),
+            title: title.to_string(),
+            tab_type: "ext_ws".to_string(),
+            group_title: None,
+            active: false,
+            connected_at: None,
+        }
+    }
+
+    // TA：`parse_tab_id("")` 的契约是「空串 = 会话已失效」，返回 `Err`。
     /// 这条断言把历史上「注释说 Ok(0)、实现返回 Err」的分歧固化下来：
     /// 只允许在更上层（`exec` 等不需要 tabId 的路径）跳过调用，不允许返回值骗人。
     #[test]
@@ -1247,5 +1350,81 @@ mod regression_tests {
             .downcast_ref::<SessionSelectError>()
             .expect("require_tab_id 应给 typed 错误");
         assert_eq!(typed.code, "session_gone");
+    }
+
+    // url / title 子串过滤大小写不敏感；`filter` 命中任一即可。
+    #[test]
+    fn tabs_filters_are_case_insensitive() {
+        let tab = sample_tab("https://Example.COM/Docs", "Atb Docs");
+        assert!(tab_matches_filters(&tab, Some("example.com"), None, None));
+        assert!(tab_matches_filters(&tab, Some("EXAMPLE"), None, None));
+        assert!(tab_matches_filters(&tab, None, Some("atb"), None));
+        assert!(tab_matches_filters(&tab, None, None, Some("docs")));
+        // filter 是 URL 或标题任一命中。
+        assert!(tab_matches_filters(&tab, None, None, Some("atb docs")));
+        assert!(!tab_matches_filters(&tab, None, None, Some("missing")));
+        // 空子串等同不过滤。
+        assert!(tab_matches_filters(&tab, Some(""), Some(""), Some("")));
+    }
+
+    /// 三个条件同时给时是 AND：任一不满足就过滤掉。
+    #[test]
+    fn tabs_filters_combine_with_and() {
+        let tab = sample_tab("https://example.com/docs", "Documentation");
+        assert!(tab_matches_filters(
+            &tab,
+            Some("example"),
+            Some("doc"),
+            Some("docs")
+        ));
+        assert!(!tab_matches_filters(
+            &tab,
+            Some("example"),
+            Some("nomatch"),
+            None
+        ));
+        assert!(!tab_matches_filters(
+            &tab,
+            Some("nomatch"),
+            Some("doc"),
+            None
+        ));
+    }
+
+    /// 大列表提示只在超过阈值时出现；阈值本身来自 settings 访问器。
+    #[test]
+    fn tabs_large_suggest_only_over_threshold() {
+        let threshold = crate::settings::tabs_large_warning();
+        assert!(tabs_large_suggest(threshold).is_none());
+        assert_eq!(tabs_large_suggest(threshold + 1), Some(TABS_LARGE_SUGGEST));
+    }
+
+    /// GET Query 用 snake_case；camelCase 作为 alias 继续兼容，flatten 不吞字段。
+    #[test]
+    fn tabs_query_accepts_snake_case_and_camel_alias() {
+        let snake: TabsQueryExt = serde_json::from_value(json!({
+            "url_contains": "example",
+            "title_contains": "docs",
+            "filter": "atb",
+            "mine": true,
+            "browser": "Chrome",
+            "full": true,
+        }))
+        .expect("snake_case query 应可反序列化");
+        assert_eq!(snake.url_contains.as_deref(), Some("example"));
+        assert_eq!(snake.title_contains.as_deref(), Some("docs"));
+        assert_eq!(snake.filter.as_deref(), Some("atb"));
+        assert!(snake.mine);
+        assert_eq!(snake.inner.browser.as_deref(), Some("Chrome"));
+        assert!(snake.inner.full);
+
+        let camel: TabsQueryExt = serde_json::from_value(json!({
+            "urlContains": "example",
+            "titleContains": "docs",
+        }))
+        .expect("camelCase alias 应可反序列化");
+        assert_eq!(camel.url_contains.as_deref(), Some("example"));
+        assert_eq!(camel.title_contains.as_deref(), Some("docs"));
+        assert!(camel.filter.is_none());
     }
 }

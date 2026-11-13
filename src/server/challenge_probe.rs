@@ -4,7 +4,7 @@ use super::*;
 /// `attach_challenge_if_blocked` 共用同一份列表）。
 ///
 /// 两处曾经各写一份，`should_probe_challenge` 里还留着已声明移除的 "access denied"，
-/// 于是同一个 403 页在 open 与 read 两条路径上得到相反结论。
+// 于是同一个 403 页在 open 与 read 两条路径上得到相反结论。
 pub(crate) const CHALLENGE_TITLE_HINTS: [&str; 12] = [
     "just a moment",
     "attention required",
@@ -28,7 +28,7 @@ fn diag_error_limit() -> usize {
     crate::settings::diag_depth().max(1)
 }
 
-/// 把底层 `Err` 的原文限量收进 diag。
+// 把底层 `Err` 的原文限量收进 diag。
 ///
 /// 旧实现把 `Err` 层层吞成 `false` / 空集合，上层只能看到
 /// "no challenge iframe" 这类结论，根因（attach 失败 / 回包缺失 / 超时）完全丢失。
@@ -55,7 +55,7 @@ pub(crate) fn push_diag_error(
 
 /// 距截止时间还剩多少；归零返回 `None`（调用方负责把「预算耗尽」写进 diag）。
 ///
-/// 单次 CDP 调用的超时必须在**每次调用前**按 deadline 重算，
+// 单次 CDP 调用的超时必须在**每次调用前**按 deadline 重算，
 /// 不能在循环里复用同一个 `timeout`，否则 N 个 iframe 的最坏耗时是 N×timeout。
 pub(crate) fn deadline_left(deadline: Instant) -> Option<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
@@ -548,7 +548,7 @@ impl ChallengeFrame {
     /// 用户给的点击坐标 / 组件内的落点都不该是负数：仿射变换后的负值只可能来自
     /// 「组件被滚出视口 / 旋转后越界」。夹紧比把一个 -37px 的坐标直接发给 CDP 好 ——
     /// 后者在部分 Chrome 版本上会被静默拒绝。返回 `(坐标, 是否夹紧)`，
-    /// 调用方把 `true` 写进 diag。
+    // 调用方把 `true` 写进 diag。
     pub(crate) fn to_screen_clamped(&self, lx: f64, ly: f64) -> ((f64, f64), bool) {
         let (sx, sy) = self.to_screen(lx, ly);
         let cx = sx.max(0.0);
@@ -557,7 +557,7 @@ impl ChallengeFrame {
     }
 }
 
-/// 组件签名：识别「同一个组件」还是「换了一个实例」。
+// 组件签名：识别「同一个组件」还是「换了一个实例」。
 ///
 /// 旧实现只用 iframe URL：页面用同一个 URL 重新加载组件时签名不变，
 /// 求解器会把新组件当成旧的，验证期继续补点，把流程打回原点。
@@ -588,7 +588,7 @@ pub(crate) fn challenge_frame_signature(frame: &ChallengeFrame) -> String {
 /// `contentWindow.location` 或 `document.write` 填充，属性值读不到真实地址。
 /// describeNode(depth:0) 的 contentDocument.documentURL 是实际导航地址，更可靠。
 ///
-/// 每次 CDP 调用前都按 `deadline` 重算剩余量；预算归零立刻返回空串
+// 每次 CDP 调用前都按 `deadline` 重算剩余量；预算归零立刻返回空串
 /// （调用方会把它当成「这一帧没探到」，不再往下花时间）。
 pub(crate) async fn iframe_doc_url(
     state: &AppState,
@@ -704,10 +704,10 @@ pub(crate) async fn iframe_doc_url(
 /// 只在已确认「页面存在挑战」时调用，那时页面很小，全量 pierce 的代价可控；
 /// 换来的是不漏掉 shadow root 里的组件。
 ///
-/// 第二个返回值是 的成败标记：**查询本身失败**（CDP 附不上 / DOM 域不可用）
+// 第二个返回值是 的成败标记：**查询本身失败**（CDP 附不上 / DOM 域不可用）
 /// 与「文档里真的没有 iframe」是两件事。
 ///
-/// 旧实现先 `DOM.getDocument{depth:1}` 拿 rootId 做 querySelectorAll，
+// 旧实现先 `DOM.getDocument{depth:1}` 拿 rootId 做 querySelectorAll，
 /// 再 `DOM.getDocument{depth:-1}` 全量遍历，两次回包的 nodeId 属于**不同的前端节点
 /// 映射**，混用会把别的节点当 iframe。现在只做一次全量 getDocument，
 /// 所有 iframe 都从同一棵树里取。
@@ -811,7 +811,7 @@ pub(crate) fn is_foreign_extension_frame_error(message: &str) -> bool {
 /// 摘除其它扩展 iframe 的结果。
 ///
 /// `SkippedUnknownOwnId` 表示「拿不到本扩展 id，因此一个都没删」：
-/// 这与「摘了 0 个」必须可区分，调用方要据此换回落通道。
+// 这与「摘了 0 个」必须可区分，调用方要据此换回落通道。
 pub(crate) enum StripFramesOutcome {
     Stripped(u64),
     SkippedUnknownOwnId,
@@ -845,11 +845,11 @@ async fn own_extension_id(state: &AppState, session_key: &str) -> Option<String>
 /// 只处理当前文档这一次：这类扩展会在下一次导航时重新注入，做成持久化反而会
 /// 影响用户其它页面。返回值是摘掉的个数，写进 diag 让排障能看到「为什么突然能用了」。
 ///
-/// 旧实现无差别删除**所有** `chrome-extension://` iframe，包括本工具自己
+// 旧实现无差别删除**所有** `chrome-extension://` iframe，包括本工具自己
 /// 注入的组件和用户合法扩展。现在只删「扩展 id ≠ 自身 id」的；自身 id 拿不到时
 /// **一个都不删**，返回 `SkippedUnknownOwnId` 让调用方换回落通道并如实记录。
 ///
-/// 失败必须返回 `Err`：旧实现 `.ok...unwrap_or(0)` 把「脚本根本没跑」
+// 失败必须返回 `Err`：旧实现 `.ok()...unwrap_or(0)` 把「脚本根本没跑」
 /// 和「跑完了、一个都没摘掉」压成同一个 0，排障时完全看不出 attach 为什么还是失败。
 pub(crate) async fn strip_foreign_extension_frames(
     state: &AppState,

@@ -7,14 +7,14 @@ use super::*;
 /// 而验证码组件恰恰全是跨源的。`DOM.querySelectorAll('iframe')` 拿的是元素本身，
 /// 跨不跨源都一样；盒模型还自带 CSS transform 后的四角坐标。
 ///
-/// `deadline` 是整条探测链的硬截止。每次 CDP 调用前都按剩余量重算超时，
+// `deadline` 是整条探测链的硬截止。每次 CDP 调用前都按剩余量重算超时，
 /// 归零立刻收手 —— 旧实现把同一个 `timeout` 复用到每个 iframe 的所有调用上，
 /// 30 个 iframe 就能把 `--timeout 30` 顶成好几分钟。
 ///
 /// 第二个返回值是排障诊断：定位要过 文档 → iframe 元素 → 盒模型 三关，
 /// 任何一关失败都表现为「没找到组件」，没有诊断就只能瞎猜。
 ///
-/// 第三个返回值 `query_failed` 是 的判据：**查询本身失败**（CDP 附不上 /
+// 第三个返回值 `query_failed` 是 的判据：**查询本身失败**（CDP 附不上 /
 /// DOM 域不可用 / 回包缺失）与「页面上真的没有 iframe」必须分开。旧实现把两种
 /// 情况都压成空集合，求解决策里「组件消失」被当成「点击被接收」（widget-removed），
 /// 于是一次 attach 失败就让整轮求解提前停手等结论。
@@ -49,7 +49,7 @@ pub(crate) async fn challenge_frames(
         // attach 失败本身就是根因，先原样收进 diag，再判断是不是跨扩展 iframe。
         push_diag_error(&mut diag, "dom-enable", "attach_failed", &message, None);
         if is_foreign_extension_frame_error(&message) {
-            // 摘除失败、以及「拿不到自身扩展 id 所以没摘」都要单独记录。
+            // ：摘除失败、以及「拿不到自身扩展 id 所以没摘」都要单独记录。
             match strip_foreign_extension_frames(state, session_key).await {
                 Ok(StripFramesOutcome::Stripped(stripped)) => {
                     diag.push(json!({
@@ -259,7 +259,7 @@ pub(crate) async fn challenge_frames(
 /// 中心点是否真的命中了这个 iframe（而不是被别的元素盖住）。
 ///
 /// `about:blank` / `srcdoc` 的包裹 iframe 没有 URL 特征，只能靠几何 + hit-test
-/// 判断它是不是「用户能看见、能点到」的组件。CDP 的
+// 判断它是不是「用户能看见、能点到」的组件。CDP 的
 /// `DOM.getNodeForLocation` 返回最顶层节点；命中点属于别的元素就说明它被遮挡。
 async fn iframe_hit_test_visible(
     state: &AppState,
@@ -379,7 +379,7 @@ const MIN_EVENT_BUDGET: Duration = Duration::from_millis(25);
 /// 间距由 CDP 往返自然产生；从左侧 24px 滑入只是为了让 Turnstile 看到
 /// mouseenter → mousemove → mousedown 的完整序列。
 ///
-/// `deadline` 是**整条链**的硬截止。6 次 `Input.dispatchMouseEvent`
+// `deadline` 是**整条链**的硬截止。6 次 `Input.dispatchMouseEvent`
 /// 每次都在发送前按剩余量截断；不足一次事件就提前返回
 /// `challenge_click_timeout`。旧实现让每次调用各用 `per_call`，扩展挂死时最坏
 /// 能到 6×15s，`--timeout` 完全失效。
@@ -576,7 +576,7 @@ pub(crate) async fn challenge_wait_result(
                 .unwrap_or(false);
             if env_bad {
                 env_restored = true;
-                // 切不过去就别静默失败；激活统一走
+                // ：切不过去就别静默失败；激活统一走
                 // `challenge_activate_tab`（仅在非 active 时切换、同窗口带冷却）。
                 challenge_activate_tab(state, session_key, false, &mut diag).await;
             }

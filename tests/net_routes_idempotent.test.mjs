@@ -300,7 +300,7 @@ check(
 check(
   'src/server 不再产出 top_change 字段',
   !/["']top_change["']\s*:/.test(stripComments(source)),
-  'top_change 回传原始 HTML 片段，是 BUG-27 的回归点',
+  'top_change 回传原始 HTML 片段，是回归测试点',
 );
 
 const failed = results.filter((item) => !item.ok);

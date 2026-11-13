@@ -4,13 +4,13 @@
 
 面向 Agent 的浏览器 CLI：Rust daemon + Chrome MV3 扩展桥，操作用户已登录的真实 Chrome / Edge。
 
-标签页扫描 · 页面读取 · JS 执行 · 点击填表 · 截图 / PDF · Cookie · 网络拦截 · CDP · 多智能体隔离
+标签页扫描 · 页面读取 · JS 执行 · 点击填表 · 用户脚本 · 截图 / PDF · Cookie · 网络拦截 · CDP · 多智能体隔离
 
 <p>
   <a href="https://github.com/1728578755/atb-cli"><img src="https://img.shields.io/badge/CLI-atb-2ea44f" alt="CLI atb"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License MIT"></a>
   <a href="https://github.com/1728578755/atb-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6?labelColor=0078D6&color=C0C0C0" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/1728578755/atb-cli/releases"><img src="https://img.shields.io/badge/release-v0.7.4-orange" alt="release v0.7.4"></a>
+  <a href="https://github.com/1728578755/atb-cli/releases"><img src="https://img.shields.io/badge/release-v0.8.0-orange" alt="release v0.8.0"></a>
   <a href="https://github.com/1728578755/atb-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -72,12 +72,13 @@ atb status
 
 | 域 | 代表命令 | 说明 |
 | --- | --- | --- |
+| 目标与环境 | `atb focus` / `atb use` / `atb env` | 切前台、固定默认目标、一次聚合浏览器 / 扩展 / 标签 / 注入状态 |
 | 页面读取 | `atb read` | 正文抽取、链接、隐藏节点、iframe，按字符预算截断 |
-| 页面操作 | `atb snapshot` | 生成 `@e1` 引用，供点击、填表、下拉、上传、滚动使用 |
-| 脚本与批处理 | `atb exec` / `atb scrape` | 执行 JS、多步脚本、跨标签批量抓取、异步 job |
-| 网络与调试 | `atb net` / `atb console` / `atb downloads` | 抓请求、mock 响应、console、下载监听 |
+| 页面操作 | `atb snapshot` / `atb measure` | 生成 `@e1` 引用；量测元素 rect、computed style 与 shadow 路径 |
+| 脚本与批处理 | `atb exec` / `atb inject` / `atb userscript` / `atb scrape` | 执行 JS、多文件拼接、GM 兼容注入、油猴安装页、跨标签批量抓取 |
+| 网络与调试 | `atb net` / `atb console` / `atb downloads` | 抓请求、mock 响应、console 历史与跟随、下载监听 |
 | 挑战与痕迹 | `atb challenge` / `atb stealth` | 挑战页识别与主动求解；痕迹审计与清理 |
-| 多浏览器与运维 | `atb browsers` / `atb doctor` / `atb logs` | 多浏览器 / Profile 选择、诊断与日志 |
+| 多浏览器与运维 | `atb browsers` / `atb extensions` / `atb doctor` / `atb logs` | 多浏览器 / Profile 选择、已安装扩展、诊断与日志 |
 
 ## 安装
 
@@ -88,7 +89,7 @@ npm i -g @g1728578755/atb
 atb status
 ```
 
-预编译二进制按平台从 `optionalDependencies` 安装，不需要 Rust 工具链。
+预编译二进制按平台从 `optionalDependencies` 安装，不需要 Rust 工具链。新脚本统一写 `atb`。
 
 ### 源码构建
 
@@ -104,14 +105,15 @@ cargo build --release
 1. 从 [最新 Release](https://github.com/1728578755/atb-cli/releases/latest) 下载 `chrome-extensions.zip`，解压到一个固定目录（zip 根目录就是扩展文件，`manifest.json` 直接在该目录里），或直接用仓库里的 `assets/atb_bridge`。
 2. 打开 `chrome://extensions`（Edge 为 `edge://extensions`），开启开发者模式，点「加载已解压的扩展程序」，选中直接含 `manifest.json` 的那一层目录。
 3. 浏览器里至少留一个正常网页标签页，不要只停在 `about:blank` 或 `chrome://`。
-4. **本版本需要扩展 5.4.2**。覆盖扩展目录后，daemon 在下次握手时会让扩展自动重载；daemon 未运行就到扩展管理页手动点「重新加载」——只覆盖文件不重载，页面里跑的还是旧代码。
-5. 点工具栏的 ATB 图标打开弹窗：顶部是连接状态，下面分「状态 / 数据 / 设置」。右上角齿轮进入**管理页面**（也可从 `chrome://extensions` → 详情 → 扩展程序选项 打开），可改端口、token、信任档位、主题、弹窗宽度与间距，并查看 Cookie、心跳与自检结果。
+4. **本版本需要扩展 5.5.0**。覆盖扩展目录后，daemon 在下次握手时会让扩展自动重载；daemon 未运行就到扩展管理页手动点「重新加载」——只覆盖文件不重载，页面里跑的还是旧代码。
+5. 点工具栏的 ATB 图标打开弹窗：顶部是连接状态，下面分「状态 / 数据 / 设置」。右上角齿轮进入**管理页面**（也可从 `chrome://extensions` → 详情 → 扩展程序选项 打开），可改端口、token、信任档位、主题、弹窗宽度与间距，并查看 Cookie、心跳与自检结果。要用 `atb extensions` 时，到管理页「关于 → 高级权限」点击授权 `management`；这是可选权限，未授权时命令返回 `permission_required`。授权成功后扩展会自动重载一次（MV3 Service Worker 需要重载才能拿到 `management` API），页面刷新后即可运行。
 
 ### 验证
 
 ```bash
 atb tabs --ids           # 先跑它：自动拉起 daemon，也能确认扩展桥通了
 atb status               # 再做健康检查；直接先跑 status 会看到 daemon_not_running
+atb env                  # 浏览器 / Profile / 扩展 / 标签 / 注入一次看
 atb doctor               # 连不上时用它定位端口、token、daemon 状态
 ```
 
@@ -137,7 +139,7 @@ WSL 需 `WSL 2.0.0+`，建议 Windows 11 22H2+ 并在 `.wslconfig` 开 `networki
 
 扩展以 WebSocket 连到 `127.0.0.1:18765`，端口来自 `~/.atb/config.json` 的 `extension_port`。daemon 下发命令，扩展在标签页里执行后回传 JSON。
 
-`status` / `tabs` / `browsers` 里的 `browser_label` 带品牌与完整版本（如 `Chrome 156.0.8078.79 · Windows · #cac3`），多浏览器并行时可直接区分是哪一个、什么版本。扩展重载或浏览器重启会让该浏览器名下的标签 id 全部失效，此时返回 `session_gone`，重新 `open` 或先 `tabs` 取新列表。
+`status` / `tabs` / `browsers` 里的 `browser_label` 带品牌与完整版本（如 `Chrome 156.0.8078.79 · Windows · #cac3`），多浏览器并行时可直接区分是哪一个、什么版本。扩展重载或浏览器重启会让该浏览器名下的标签 id 全部失效，此时返回 `session_gone`，重新 `open` 或先 `tabs` 取新列表。`status` 另外给出 `browser` / `browser_label` / `profile` / `browser_summary`，并在 stderr 打一行「→ 正在操作：…」摘要。
 
 ### 智能体身份
 
@@ -145,16 +147,33 @@ WSL 需 `WSL 2.0.0+`，建议 Windows 11 22H2+ 并在 `.wslconfig` 开 `networki
 
 ### 目标选择
 
-`--tab` 接受单个 id、`111,222`、`all`、`@1` / `@1-5`、`url:<子串>`、`title:<子串>`、`group:<标题>`、`window:<id>`、`current`。多目标并发执行、按输入顺序返回、单条失败不影响其它；写文件时 `--out` 必须含 `{tab}` 或 `{index}`，否则预检拒绝。
+`--tab` 接受单个 id、`111,222`、`all`、`@1` / `@1-5`、`@latest`、`url:<子串>`、`title:<子串>`、`group:<标题>`、`window:<id>`、`current`。多目标并发执行、按输入顺序返回、单条失败不影响其它；写文件时 `--out` 必须含 `{tab}` 或 `{index}`，否则预检拒绝。
+
+- `@latest` 是 daemon 记录的「最近打开 / 最近连接」标签页；`@1` 仍然是 `tabs` 输出顺序的第 1 个，两者不是一回事。
+- `atb use <target>` 把当前智能体的默认目标固定到某个标签页（命中多个会报 `target_ambiguous`，不会静默取第一个）；之后不写 `--tab` 的命令都用它。
+- `atb focus --tab @latest` 把标签切到前台；`--no-window` 只激活标签、不抢系统窗口焦点。
+- 单目标页面命令的响应顶层新增 `resolved_target`（tab_id / session_key / url / title / browser_id / profile_id / active）、`browser`、`profile`、`warnings`、`hint`。目标在后台时 `warnings` 带 `tab_hidden` / `timers_throttled`，并提示先 `focus`（`ATB_HIDDEN_TAB_WARNING=off` 可关）。
+- CLI 默认在 stderr 打一行「→ 正在操作：…」；`ATB_BROWSER_BANNER=off` 关闭，`always` 每条命令都打。
 
 ### 协议
 
-三个版本必须配套：CLI ↔ daemon 的 API 协议（当前 **5**）、扩展消息协议（当前 **4**）、扩展文件版本（当前 **5.4.2**）。`atb status` 的 `compatibility` 字段会同时给出期望值与实际值，不配套时带 `fixes[]`。
+三个版本必须配套：CLI ↔ daemon 的 API 协议（当前 **5**）、扩展消息协议（当前 **4**）、扩展文件版本（当前 **5.5.0**）。`atb status` 的 `compatibility` 字段会同时给出期望值与实际值，不配套时带 `fixes[]`。
 
-### 0.7.4 / 扩展 5.4.2 的新增能力
+### 0.8.0 / 扩展 5.5.0 的新增能力
+
+顶层命令从 55 个增加到 **61** 个：新增 `focus`、`use`、`env`、`extensions`、`measure`、`userscript`。
 
 | 能力 | 说明 |
 | --- | --- |
+| 目标控制 | `focus` 把标签切前台（`--no-window` 不抢窗口焦点）；`use <target>` 固定当前智能体的默认目标；`--tab @latest` 表示最近打开 / 连接（`@1` 仍是列表第 1 个） |
+| 目标身份 | 单目标页面命令响应顶层带 `resolved_target` / `browser` / `profile` / `warnings` / `hint`；后台标签带 `tab_hidden` / `timers_throttled`，CLI stderr 打一行「→ 正在操作：…」 |
+| 环境与扩展 | `env` 一次输出浏览器 / Profile / 扩展 / 标签摘要 / 持久注入 / 警告，默认目标与激活标签排最前；`extensions` 列出已安装扩展（`management` 是可选权限，需用户点击授权） |
+| 元素量测 | `measure --selector` 返回 rect / viewport / computed style / visible / `shadow_path`，支持 `host >>> inner`，不接受 `@e`；成功结果不再套 `js_return` |
+| 用户脚本 | `userscript <file-or-url>` 解析 `==UserScript==` 并打开安装页；`inject --userscript` 注入最小 GM shim，支持 `--cleanup-selector` / `--cleanup-file` 清理旧宿主 |
+| 截图等待 | `screenshot --settle-ms` / `--wait-selector` / `--network-idle[=ms]` / `--require-cdp`；结果带 `tab_visible` / `captured_tab` / `clip_box` / `degraded` / `warning` / `warnings` |
+| tabs 过滤 | `tabs --url-contains` / `--title-contains` / `--filter` / `--format json\|jsonl\|tsv`；大列表附 `suggest` |
+| console 历史 | `console history` 取回加载期 error / unhandledrejection（`--settle-ms` / `--types` / `--clear`）；`console tail` 轮询跟随，不自动启动采集 |
+| job 进度 | `job tail <id>` 输出 JSONL 进度快照（`elapsed_ms` / `last_heartbeat` / `stalled`）；`job result <exec_id>` 取回超时 exec 的迟到结果 |
 | Shadow DOM | `find` / `snapshot` / `read` 递归 open shadow root，结果带 `scope:"shadow"`、`host_selector`、`shadow_path`，选择器写作 `宿主 >>> 相对路径`；closed shadow root 不可达，回包用 `shadow_closed_unreachable` 明示 |
 | PDF 分页 | 图片型 PDF 按 14200pt 切片成多页，并先按 `dpr` 归一化，HiDPI 下不再放大；回包给 `pages` / `width_pt` / `height_pt` |
 | `--max-height` | CDP 主截图路径与拼图回落都生效，超出截断并标 `truncated:true` |
@@ -165,8 +184,6 @@ WSL 需 `WSL 2.0.0+`，建议 Windows 11 22H2+ 并在 `.wslconfig` 开 `networki
 | `tabs --limit 0` | 表示不截断；`tabs_count` 仍是原始总数 |
 | `logs` | 输出 JSON：`{ok, lines[], path, truncated}` |
 | WS 信任档位 | `ATB_WS_TRUST_MODE=compat\|whitelist\|token\|both`，默认 `compat`；共用机器建议 `both` |
-| WS 双向鉴权 | 配置 `ws-trust.json` 的 token 后，daemon 在握手时下发 `ws_hello`（nonce + HMAC-SHA256 proof），扩展验过才发 `ext_ready`；没配 token 时行为不变 |
-| 结果语义收紧 | `read` / `find` 的页面 `ok:false` 上浮为失败；`--world` 非法值退出 2；`--dry-run --async` 只出计划，不建 job |
 | 扩展界面 | popup 分「状态 / 数据 / 设置」，右上角进入管理页面：主题（跟随系统 / 浅色 / 深色）、弹窗宽度（340 / 420 / 560）、间距、角标开关、token 与信任档位、Cookie 与诊断；设置存在 `storage.local`，两个入口实时同步 |
 
 ## 常用工作流
@@ -180,6 +197,10 @@ atb read --include-hidden          # 连 display:none 的内容一起返回
 atb scan --fast                    # 只要紧凑文本，大页面也快
 ```
 
+读之前先确认响应顶层的 `resolved_target`：它告诉你这次实际打到哪个 tab、哪个浏览器 / Profile。如果 `warnings` 里有 `tab_hidden` / `timers_throttled`，说明目标在后台，rAF、IntersectionObserver 与定时器会被暂停或节流；需要懒加载或动画时先 `atb focus --tab <id>`。CLI 还会在 stderr 打一行「→ 正在操作：…」，`ATB_BROWSER_BANNER=off` 可关。
+
+`open` 遇到 `chrome://` / `chrome-extension://` / `about:` 特殊页时默认只用 3 秒等待预算（`ATB_OPEN_SPECIAL_WAIT_SEC`）；不需要等页面条件就写 `--wait-for none`。`chrome-extension://` 也可以打开本工具自己的管理页。
+
 ### 填表并提交
 
 ```bash
@@ -192,6 +213,41 @@ atb wait --selector '.result' --timeout 10
 
 `snapshot` 默认、纯 CSS 选择器的 `click` / `fill` 会 attach 调试器；用 `snapshot --js` 和 `@e` 引用可走页面内通道，避免调试横幅。
 
+等框架渲染完不要固定 `sleep`：`atb wait --dom-stable` 等 DOM 连续静默 500ms（`ATB_WAIT_DOM_STABLE_MS`），`atb wait --network-idle` 等在途 fetch / XHR 归零并静默；两者都可写成 `--dom-stable 800` 覆盖窗口。`wait --js` 超时会返回最近 5 次求值的 `last_values`，用来判断条件差在哪。
+
+### 测试用户脚本（Tampermonkey 兼容）
+
+场景：前端脚本在真实站点上不生效，需要注入一段油猴脚本或复现 `GM_*` 环境。
+
+```bash
+# 1. 打开目标页并切到前台；后台标签会节流定时器，懒加载可能不触发
+atb open https://example.com/app --background
+atb focus --tab @latest
+
+# 2. 先解析 ==UserScript== 元数据，确认 @name / @match / @grant
+atb userscript ./fix.user.js --parse-only
+
+# 3. 按 GM 环境注入，并清掉旧宿主节点
+atb inject --userscript --file ./fix.user.js --gm-namespace fix-demo \
+  --cleanup-selector '#legacy-host' --cleanup-selector '.old-panel'
+
+# 4. 断言效果并截图留证
+atb exec 'return {host: !!document.querySelector("#fix-host"), flag: window.__FIX__ === true}'
+atb screenshot --selector '#fix-host' --out fix-host.png
+
+# 5. 需要跨导航保留时再 --persist；默认 2 小时过期
+atb inject --userscript --file ./fix.user.js --persist fix-demo --match 'https://example.com/*' \
+  --cleanup-selector '#fix-host'
+atb inject --list
+atb inject --remove fix-demo
+```
+
+- `inject --userscript` 注入最小 GM shim：`GM_getValue` / `GM_setValue` / `GM_deleteValue` / `GM_listValues` / `GM_registerMenuCommand` / `GM_log` / `GM_addStyle` / `GM_info` / `unsafeWindow`。`GM_xmlhttpRequest` 不支持，会直接抛错；`@require` 不会自动加载。
+- `inject` 返回 `executed` / `returned` / `threw` / `duration_ms` / `cleanup`；脚本抛错时顶层 `ok:false` + `error_code:"inject_script_threw"`，但 `executed:true` 说明副作用可能已经发生。
+- `--persist` 默认 7200 秒（2 小时）过期，扩展设置页的 `persistTtlSec` 参与默认值，`--ttl` 可覆盖。永久驻留必须同时写 `--persist-forever --i-know-this-is-long-lived`；`--list` 会给出 `expires_in_sec`、`warning` 与条目总数。
+- 页面里已经装了 Tampermonkey 版本时，两边会各插一份宿主。先用 `--cleanup-selector` 清旧节点，或让用户临时停用安装版；排查见 [troubleshooting.md](./skills/atb/references/troubleshooting.md)。
+- `userscript <file-or-url>` 只是解析元数据并打开安装页：本地文件按 `file://` 打开，由 Tampermonkey / Violentmonkey 接管；`--parse-only` 只解析本地文件、不打开页面，URL 需先下载到本地。
+
 ### 批量抓取
 
 ```bash
@@ -201,14 +257,41 @@ atb scrape --urls urls.txt --js-file grab.js --out out.jsonl --batch 6 --concurr
 
 `--urls` 收文件（每行一个）或逗号分隔列表；缺省脚本取 `{title, url, text}`。全部在 CLI 侧编排，复用 daemon 的 open / exec / close。
 
+长任务用 `job tail` 看进度，超时的 `exec` 用 `job result` 取回迟到结果：
+
+```bash
+atb --async scan --text-only
+atb job tail <jobId>                  # JSONL 快照：elapsed_ms / last_heartbeat / stalled
+atb job result <exec_id> --wait 60    # exec 超时错误里给出的 exec_id
+```
+
+`job tail` 每个状态变化输出一行 JSONL，终态退出码 `0` / `1` / `130`；跟踪超时是 `3`。`job result` 在等待窗口内找不到结果返回 `exec_result_not_found`（等待超时退出码 `3`）；迟到结果默认保留 3600 秒，可用 `ATB_EXEC_RESULT_TTL_SEC` 调整。
+
+`exec` 支持 `--file a.js --file b.js` 按顺序拼接、`--file -` 读 stdin、`--max-chars`（`--max-bytes` 的可见别名）截断返回值。本地 JS 配平检查默认 `strict`（`ATB_JS_CHECK=off|warn|strict`）；确认是误报时用 `--no-preflight`。脚本文件读不到或超限会带绝对路径、大小与 `invalid_encoding` / `script_file_too_large`。
+
 ### 多标签并发
 
 ```bash
 atb open https://a.com https://b.com --background
 atb read --tab all --max-chars 2000
 atb exec --tab @1-3 'return location.href'
+atb focus --tab @2
+atb tabs --url-contains example --format tsv
 atb screenshot --tab all --out 'shots/{index}-{tab}.png'
 ```
+
+`tabs --format` 支持 `json`（默认）/ `jsonl`（一行一个标签页）/ `tsv`（`tab_id`、标题、URL）；`--url-contains` / `--title-contains` / `--filter` 在 daemon 侧过滤。标签很多时响应会附 `suggest`，提示用 `--fields` / `--limit` 或过滤条件收窄。
+
+截图前要等渲染稳定时，用等待参数而不是固定 `sleep`：
+
+```bash
+atb screenshot --wait-selector '#chart' --network-idle --settle-ms 200 --out chart.png
+atb screenshot --full-page --require-cdp --out full.png
+```
+
+`--network-idle` 不带值表示等到在途 fetch / XHR 归零并静默 500ms（`ATB_SCREENSHOT_NETWORK_IDLE_MS`），也可写 `--network-idle 800`；`--settle-ms` 默认 `ATB_SCREENSHOT_SETTLE_MS`（0）。`--require-cdp` 让 CDP 不可用时直接报 `cdp_required`，不再静默回落 `captureVisibleTab` 或整页拼接。结果里的 `tab_visible` / `captured_tab` 说明实际截到哪个标签，`clip_box` 回显 CSS px 裁剪框，`degraded` / `warning` / `warnings` 标注降级通道。
+
+整页截图用 `captureBeyondViewport` 时，`position:fixed` / `sticky` 元素仍可能在页面底部重复出现；这是浏览器渲染限制，不是裁剪错误。需要干净长图时先临时改成 `position:absolute`（用 `inject`）或改用逐屏拼接通道，并接受固定元素每屏重复。
 
 #### 页面禁止调试器注入时（自动降级）
 
@@ -222,9 +305,8 @@ Chrome 不允许 `chrome.debugger` attach 到「内嵌了其它扩展 iframe」�
 | `save-pdf` | 整页长图包成单页 PDF（文字不可选中） | `via:"stitched-image-pdf"`、`text_selectable:false` |
 | `mouse-click` | 页面内合成鼠标事件 | `synthetic:true`、`trusted:false` |
 
-`--max-height` 限制长图高度（设备像素，默认 20000），超出按上限截断并标 `truncated:true`。
-拼接方案的固有限制：`position:fixed/sticky` 元素会在每一屏重复出现；`save-pdf` 的文字不可检索。
-需要真实输入事件或可检索 PDF 时，再考虑临时关闭注入 iframe 的扩展。
+`--max-height` 限制长图高度（设备像素）：CLI 不传即不截断，扩展整页拼图通道的默认上限是 20000；超出按上限截断并标 `truncated:true`。拼接方案的固有限制：`position:fixed/sticky` 元素会在每一屏重复出现；`save-pdf` 的文字不可检索。
+需要真实输入事件或可检索 PDF 时，再考虑临时关闭注入 iframe 的扩展；需要确定性通道时加 `--require-cdp`，CDP 不可用会直接失败而不是静默降级。
 
 ### 多智能体
 
@@ -250,9 +332,20 @@ atb challenge focus                          # 只有图片/短信等必须人�
 
 ## 命令速查
 
+顶层命令共 **61** 个；下面是按场景挑出的高频用法，完整清单以 `atb schema --json` 为准。
+
 ```bash
+# 目标与环境
+atb focus --tab @latest                    # 把最近打开 / 连接的标签切到前台
+atb use @latest                            # 固定为当前智能体的默认目标
+atb env                                    # 浏览器 / Profile / 扩展 / 标签 / 注入一次看
+atb extensions                             # 已安装扩展（需先授权 management）
+atb measure --selector 'my-app >>> .card' --styles display,position,width,height
+atb userscript ./fix.user.js --parse-only  # 只解析 ==UserScript==
+
 # 读取
 atb tabs --ids                            # 精简列表，方便选目标
+atb tabs --url-contains github --format tsv
 atb read --max-chars 8000 --links
 atb snapshot --limit 200                  # 元素引用 @e1 / @e2
 atb find --text '登录' --limit 5
@@ -268,17 +361,23 @@ atb close --tab <tabId>
 
 # 脚本与批处理
 atb exec 'return document.title'
+atb exec --file pre.js --file main.js     # 按顺序拼接；--file - 读 stdin
+atb inject --userscript --file fix.user.js --cleanup-selector '#old-host'
 atb run steps.json                        # 一个进程跑多步
 atb batch steps.json --concurrency 8
 atb scrape --urls urls.txt --out out.jsonl
 atb --async scan --text-only              # 立刻返回 job_id
+atb job tail <jobId>                      # JSONL 进度快照
 atb job wait <jobId> --timeout 300
+atb job result <exec_id> --wait 60        # 取回超时 exec 的迟到结果
 
 # 网络与调试
 atb net fetch https://api.example.com/me
 atb net hook --capture-bodies
 atb net mock /api/user --status 200 --body '{"id":1}'
 atb console start
+atb console history --types error,rejection   # 加载期报错一次取回
+atb console tail --duration 10                # 轮询跟随，不自动 start
 atb downloads --limit 10
 
 # 挑战与痕迹
@@ -288,6 +387,8 @@ atb stealth scrub
 
 # 运维
 atb status
+atb env                                   # 一次拿齐运行环境
+atb extensions                            # 已安装扩展
 atb doctor --fix
 atb capabilities
 atb schema --json                         # 顶层命令的参数 schema（子命令细节用 --help）
@@ -303,22 +404,37 @@ atb logs --tail 100
 | `0` | 成功 | — |
 | `1` | 执行失败 | 看 `error_code`；可重试的按 `retry_after_ms` 等待 |
 | `2` | 命令写错 | 改选择器 / JS / 参数 / 目标，不要重试 |
-| `3` | `job wait` / `download-wait` 超时 | 加 `--timeout`，或稍后再查询；普通 `wait` 超时是 `1` |
+| `3` | `job wait` / `job tail` / `job result --wait` / `download-wait` 超时 | 加 `--timeout`，或稍后再查询；普通 `wait` 超时是 `1` |
 | `4` | 结果未知 | 动作可能已执行；带同一个 `--idempotency-key` 重发 |
 | `130` | 任务被取消 | `job wait` 等到 `cancelled` |
+
+0.8.0 新增错误码（都带 `hint`）：
+
+| error_code | 含义 | 怎么处理 |
+| --- | --- | --- |
+| `focus_failed` | 标签切前台失败 | `tabs --ids` 确认标签仍在；扩展过旧就重载扩展 |
+| `permission_required` | `extensions` 未获 `management` 权限 | 扩展设置页「关于 → 高级权限」由用户点击授权；授权成功后扩展会自动重载，刷新后重试 |
+| `daemon_outdated` | 常驻 daemon 还是旧二进制，不认识新路由 | `atb restart` 后重试 |
+| `syntax_error` | 本地 JS 语法检查失败 | 按提示行列修正；确认无误时用 `--no-preflight` 或 `ATB_JS_CHECK=off` |
+| `inject_script_threw` | 脚本已执行但自身抛错 | 看 `executed` / `threw`；这是脚本异常，不是注入通道失败 |
+| `unsupported_selector` | 选择器形态不支持（如 `measure` 传 `@e`） | `find` 拿真实 CSS；shadow DOM 用 `host >>> inner` |
+| `exec_result_not_found` | 超时 exec 的迟到结果不存在或已过期 | 确认 `exec_id`；长任务加大 `ATB_EXEC_RESULT_TTL_SEC` 或改用 `--async` + `job wait` |
+| `cdp_required` | 指定 `--require-cdp` 但 CDP 不可用 | 去掉该 flag，或关闭挡住调试器的扩展 |
+| `invalid_encoding` | 脚本文件不是 UTF-8 | 转成 UTF-8，或用 `--file -` 从 stdin 传入 |
+| `script_file_too_large` | 脚本文件超过上限 | 拆成多个 `--file`，或提高 `ATB_SCRIPT_FILE_MAX_MB` |
 
 ## 版本与配套
 
 | 项 | 值 |
 | --- | --- |
-| CLI / daemon | `0.7.4` |
+| CLI / daemon | `0.8.0` |
 | CLI ↔ daemon API 协议 | `5` |
 | 扩展消息协议 | `4` |
-| 扩展文件版本 | `5.4.2` |
+| 扩展文件版本 | `5.5.0` |
 | 最低 Chrome | `120` |
 
-- 当前版本：`0.7.4`
-- 配套扩展：`5.4.2`（显示名 `ATB`）
+- 当前版本：`0.8.0`
+- 配套扩展：`5.5.0`（显示名 `ATB`）
 
 ```bash
 atb status
@@ -349,13 +465,15 @@ atb install-skill --dry-run      # 先看会把 skill 装到哪
 atb install-skill                # 主目录 ~/.agents/skills/atb；五个 Agent 目录建软链接
 ```
 
+`atb env` 一次聚合 `browser` / `profile` / `extension` / `tabs` / `injections` / `warnings`：`tabs.shown` 最前面是默认目标与当前激活标签，并带 `is_default`；`warnings` 会提示扩展过期、默认目标在后台、持久注入数量等。`atb extensions` 依赖可选的 `management` 权限，未授权时返回 `permission_required`，按提示到扩展设置页「关于 → 高级权限」授权。
+
 `18767` 是 CLI 的 HTTP API 端口，固定不可改，也不能拿来当扩展端口。`ATB_EXIT0=1` 可让 `status` 恢复旧版恒返回 0 的行为，仅在有脚本依赖旧行为时使用。
 
 升级 CLI：`npm i -g @g1728578755/atb@latest`，然后按「加载扩展」一节更新扩展文件。完整版本记录见 [CHANGELOG.md](./CHANGELOG.md)，交给 AI 执行的升级流程见 [AI_INSTALL.md](./AI_INSTALL.md)。
 
 ## 环境变量
 
-所有阈值、档位与开关都能用 `ATB_*` 显式调参；旧前缀 `AGENT_BROWSER_CLI_*` 仍兼容，新名优先。下表是用户可见的 56 个，测试/CI 专用的 9 个单列在最后。
+所有阈值、档位与开关都能用 `ATB_*` 显式调参；旧前缀 `AGENT_BROWSER_CLI_*` 仍兼容，新名优先。下表是用户可见的 70 个，测试/CI 专用的 9 个单列在最后。
 
 ### 身份与运行位置
 
@@ -366,12 +484,16 @@ atb install-skill                # 主目录 ~/.agents/skills/atb；五个 Agent
 | `ATB_BIN` | 自动解析 | 指向自编译的 atb 二进制 |
 | `ATB_EXIT0` | 关 | `status` 恢复旧的恒 0 退出码，值须为 `1` / `true` |
 | `ATB_NO_DEBUGGER` | 关 | 彻底禁止 `chrome.debugger` attach |
+| `ATB_BROWSER_BANNER` | `once` | CLI stderr 的「→ 正在操作：…」提示：`off` / `once` / `always` |
 
 ### 结果语义与超时
 
 | 变量 | 默认 | 作用 |
 | --- | --- | --- |
 | `ATB_RESULT_STRICT` | `warn` | 组合命令严格度：`off` / `warn` / `strict` |
+| `ATB_HIDDEN_TAB_WARNING` | `true` | 目标标签在后台时是否附 `tab_hidden` / `timers_throttled` 警告与 `focus` 提示 |
+| `ATB_OPEN_SPECIAL_WAIT_SEC` | 3 | `chrome://` / `chrome-extension://` / `about:` 特殊页的 `open --wait-for` 预算（0.5–60 秒） |
+| `ATB_WAIT_DOM_STABLE_MS` | 500 | `wait --dom-stable` 的 DOM 静默窗口（50–10000 毫秒） |
 | `ATB_WAIT_MAX_TOTAL_SEC` | 600 | `wait` / `--wait-js` 整条命令总预算（1–3600 秒） |
 | `ATB_WAIT_MIN_INTERVAL_MS` | 50 | 轮询下限，防 `interval=0` 忙轮询 |
 | `ATB_HTTP_SLACK_SEC` | 10 | CLI HTTP 超时在业务超时上追加的余量 |
@@ -386,6 +508,9 @@ atb install-skill                # 主目录 ~/.agents/skills/atb；五个 Agent
 | `ATB_IO_OVERWRITE` | `backup` | `--out` 已存在时：`backup` / `force` / `ask` / `append` |
 | `ATB_IO_SANITIZE_FILENAME` | `strict` | 下载名净化；`compat` 只告警不改名 |
 | `ATB_IO_MAX_OUTPUT_MB` | 50 | 单文件 / 内存缓冲上限（1–512MB） |
+| `ATB_SCRIPT_FILE_MAX_MB` | 32 | `exec --file` / `inject --file` 单个脚本文件上限（1–256MB） |
+| `ATB_SCREENSHOT_SETTLE_MS` | 0 | `screenshot` 未给 `--settle-ms` 时的额外等待（0–10000 毫秒） |
+| `ATB_SCREENSHOT_NETWORK_IDLE_MS` | 500 | `screenshot --network-idle` 的静默窗口（50–10000 毫秒） |
 | `ATB_CAPTURE_MAX_PIXELS` | 80000000 | 拼接截图 / 图片 PDF 的像素总量上限（100 万–5 亿） |
 
 ### 隐私与幂等
@@ -403,6 +528,18 @@ atb install-skill                # 主目录 ~/.agents/skills/atb；五个 Agent
 | `ATB_MULTI_SCOPE` | `agent` | `--tab all` 的默认归属范围；`all` 才跨 agent |
 | `ATB_PREFERRED_MISS_LIMIT` | 3 | 首选默认目标连续未命中多少次后放弃 |
 | `ATB_PREFERRED_MISS_TTL_SEC` | 120 | 首选默认目标未命中持续多久后放弃（1–86400 秒） |
+
+### 脚本、注入与任务
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `ATB_JS_CHECK` | `strict` | 本地 JS 配平检查：`off` / `warn` / `strict`；`exec` / `inject` 的 `--no-preflight` 只跳过单条命令 |
+| `ATB_EXEC_RESULT_TTL_SEC` | 3600 | 超时 exec 的迟到结果保留时长（60–86400 秒） |
+| `ATB_INJECT_PERSIST_DEFAULT_TTL_SEC` | 7200 | `inject --persist` 未给 `--ttl` 时的默认寿命（60–2592000 秒） |
+| `ATB_INJECT_PERSIST_MAX_TTL_SEC` | 2592000 | `inject --ttl` 允许的最大值（60–31536000 秒） |
+| `ATB_CONSOLE_HISTORY_SETTLE_MS` | 300 | `console history` 挂上监听后的采样窗口（50–5000 毫秒） |
+| `ATB_JOB_STALL_SEC` | 60 | `job list` / `job tail` 判定 `stalled` 的心跳超时（5–3600 秒） |
+| `ATB_TABS_LARGE_WARNING` | 50 | `tabs` 超过该条数时附 `suggest`（10–500） |
 
 ### 下载
 
@@ -485,7 +622,7 @@ atb install-skill                # 主目录 ~/.agents/skills/atb；五个 Agent
 - CLI、daemon、扩展之间的通信都在 `127.0.0.1`；无遥测、无远程代码、无广告 SDK。你操作的网页仍会按站点自身逻辑联网。
 - `trust-extension` 配了 token 就是双向的：daemon 在 WS upgrade 后立刻下发 `ws_hello`（nonce + HMAC proof），扩展验过才发 `ext_ready`；没配 token 时（默认 `compat`）扩展无法验证对端身份。
 - daemon 在没有扩展连接且空闲 300 秒后退出；只 `atb stop` 会释放 18765 而扩展仍会重连，要收口就同时禁用扩展或关闭浏览器。
-- 扩展声明的权限：`cookies`、`tabs`、`tabGroups`、`activeTab`、`debugger`、`scripting`、`alarms`、`storage`、`declarativeNetRequest`、`webNavigation`、`downloads`（完整列表以 `assets/atb_bridge/manifest.json` 为准）。页面数据只在你或 CLI 主动下命令时读取；`blockingExtensions` 只回报挡路扩展的 id / 来源，不再反查扩展名。
+- 扩展声明的权限：`cookies`、`tabs`、`tabGroups`、`activeTab`、`debugger`、`scripting`、`alarms`、`storage`、`declarativeNetRequest`、`webNavigation`、`downloads`（完整列表以 `assets/atb_bridge/manifest.json` 为准）。`management` 是**可选权限**：只有用户在扩展设置页「关于 → 高级权限」点击授权后才启用，用于 `atb extensions`；未授权时命令返回 `permission_required`，不会退回「只列本工具扩展」。页面数据只在你或 CLI 主动下命令时读取；`blockingExtensions` 只回报挡路扩展的 id / 来源，不再反查扩展名。
 - WS 信任默认是 `compat`：未配 token 时任何本机进程都能连 18765。在 `ws-trust.json` 配上 token 后，握手即双向鉴权（`ws_hello` + HMAC proof），不依赖切档；`ATB_WS_TRUST_MODE` 的 `whitelist` / `token` / `both` 另控制「谁能连」，需显式切档才生效。共用机器请配白名单 + token 并按需设为 `both` 再 `atb restart`。`atb status` 的 `security.warning` 会提示当前档位。
 - 幂等记录默认 `ATB_IDEMPOTENCY_PERSIST=redacted`，只存 key / scope / 时间 / 状态，不存响应体；`daemon.log` 为 0600、目录 0700，`ws-trust.json` 与 `api-token` 同等收紧。
 - `challenge` 会主动与页面上的验证组件交互（点击并等待）。
@@ -502,6 +639,8 @@ atb install-skill                # 主目录 ~/.agents/skills/atb；五个 Agent
 - 不接管 Firefox / Safari，只支持 Chromium 系浏览器加扩展。
 - 指纹伪装（改 UA / canvas / WebGL / 硬件值）尚未实现，列入未来工作；stealth 当前只清除本工具写入页面的内容。
 - 能自动处理的是 JS 挑战和可点击的 Turnstile；图片点选、滑块、短信/邮箱验证尚未实现，列入未来工作。
+- 后台标签页会暂停 `requestAnimationFrame` / `IntersectionObserver` 并节流定时器；懒加载、动画、可见性判断需要先 `atb focus`，命令响应里的 `tab_hidden` / `timers_throttled` 就是提示。
+- 整页截图使用 CDP `captureBeyondViewport` 时，`position:fixed/sticky` 元素仍可能在底部重复；逐屏拼接则会在每屏重复。这是浏览器渲染限制，不是裁剪错误。
 - 扩展桥断开时无法操作任何标签页。
 
 ## 文档地图
@@ -536,4 +675,4 @@ atb install-skill                # 主目录 ~/.agents/skills/atb；五个 Agent
 
 ## 许可证
 
-MIT License，Copyright (c) 2026 sleepinginsummer。见 [LICENSE](./LICENSE)。
+MIT License，Copyright (c) 2026 1728578755 / sleepinginsummer / lsdefine。见 [LICENSE](./LICENSE)。

@@ -26,7 +26,7 @@ fn configured_extension_port() -> (u16, Option<String>) {
 /// 杀进程。放宽到 3s：既覆盖排队，又不至于让 status 自己变成慢命令。
 const HEALTH_PROBE_TIMEOUT: f64 = 3.0;
 
-/// 探测失败的分类**只看结构化证据**。
+// 探测失败的分类**只看结构化证据**。
 ///
 /// 以前用「中英文子串」判 timeout/token，而且 timeout 判定写在 token 前面：daemon
 /// 回 401 时错误文本里若恰好带 "timeout"（例如上游代理）就会被误判成「daemon 忙」。
@@ -84,7 +84,7 @@ pub(crate) fn status_value() -> Result<Value> {
         Ok(value) => enrich_status(value),
         Err(err) if is_server_alive() => {
             // 端口在监听却拿不到 /health：三种成因的下一步完全不同，不能一律归因 token
-            // （token 归因对「401/403」成立，对「没答完」是误诊）。
+            //。
             match health_failure_code(&err) {
                 Some("health_timeout") => unhealthy_value(
                     "health_timeout",
@@ -131,10 +131,150 @@ pub(crate) fn status_value() -> Result<Value> {
     // 放在最后统一挂载：healthy / unhealthy 两条路径都能看到同一块结论。
     let security = security_value(value.get("ws_security"));
     value["security"] = security;
+    // 浏览器身份（healthy / unhealthy 两条路径都要有）。
+    // 只从 /health 读取，不为 status 额外发请求。
+    attach_browser_identity(&mut value);
     Ok(value)
 }
 
-/// 可观测性：WS 鉴权现状（只增字段，不改任何信任判定逻辑）。
+/// `status` 里「正在操作哪个浏览器/profile」的推导结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StatusBrowserIdentity {
+    browser_id: Option<String>,
+    browser_label: Option<String>,
+    profile_id: Option<String>,
+    profile_label: Option<String>,
+    active_tabs: u64,
+    profile_count: usize,
+}
+
+impl StatusBrowserIdentity {
+    fn browser_name(&self) -> Option<&str> {
+        self.browser_label.as_deref().or(self.browser_id.as_deref())
+    }
+
+    fn profile_name(&self) -> Option<&str> {
+        self.profile_label.as_deref().or(self.profile_id.as_deref())
+    }
+
+    /// 人读一行：「正在操作：Chrome … （默认，3 tabs）」。
+    fn summary(&self) -> Option<String> {
+        let browser = self.browser_name()?;
+        let profile = self
+            .profile_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| "Profile 未知".to_string());
+        Some(format!(
+            "正在操作：{browser}（{profile}，{} tabs）",
+            self.active_tabs
+        ))
+    }
+}
+
+fn non_empty_text(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// 从 `/health.connection.profiles[]` 推导默认浏览器身份（纯函数，便于单测）。
+///
+/// 优先级：`is_default` → 与 `default_browser_id/default_profile_id` 匹配 →
+/// 只有一个 profile 时取它。多个 profile 且没有默认标记时返回空：
+/// status 宁可不显示，也不能把「当前默认」指到错误的浏览器上。
+fn status_browser_identity(value: &Value) -> StatusBrowserIdentity {
+    let profiles = value
+        .pointer("/connection/profiles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let default_browser_id = value
+        .pointer("/connection/default_browser_id")
+        .and_then(Value::as_str);
+    let default_profile_id = value
+        .pointer("/connection/default_profile_id")
+        .and_then(Value::as_str);
+    let active_tabs = value
+        .pointer("/connection/active_tabs")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let chosen = profiles
+        .iter()
+        .find(|profile| {
+            profile
+                .get("is_default")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .or_else(|| {
+            profiles.iter().find(|profile| {
+                let browser_id = profile.get("browser_id").and_then(Value::as_str);
+                let profile_id = profile.get("profile_id").and_then(Value::as_str);
+                (default_browser_id.is_some() || default_profile_id.is_some())
+                    && default_browser_id
+                        .map(|expected| browser_id == Some(expected))
+                        .unwrap_or(true)
+                    && default_profile_id
+                        .map(|expected| profile_id == Some(expected))
+                        .unwrap_or(true)
+            })
+        })
+        .or_else(|| {
+            if profiles.len() == 1 {
+                profiles.first()
+            } else {
+                None
+            }
+        });
+
+    let mut identity = StatusBrowserIdentity {
+        active_tabs,
+        profile_count: profiles.len(),
+        ..StatusBrowserIdentity::default()
+    };
+    if let Some(profile) = chosen {
+        identity.browser_id = non_empty_text(profile.get("browser_id"));
+        identity.browser_label = non_empty_text(profile.get("browser_label"));
+        identity.profile_id = non_empty_text(profile.get("profile_id"));
+        identity.profile_label = non_empty_text(profile.get("profile_label"));
+    } else if default_browser_id.is_some() || default_profile_id.is_some() {
+        // 旧 daemon 没有 profiles[]，但仍有 default_*_id：至少回 id，不伪造 label。
+        identity.browser_id = default_browser_id.map(str::to_string);
+        identity.profile_id = default_profile_id.map(str::to_string);
+    }
+    identity
+}
+
+/// 把浏览器身份字段挂到 status 回包（只增字段，不改 `summary`/`ok`/`healthy`）。
+///
+/// 注意：既有的 `summary` 是**健康分类**（`ready` / `daemon_not_running` …），
+/// 被文档与调用方当作稳定枚举使用；人读的一行放在新增的 `browser_summary`，
+/// 不能覆盖 `summary`（§12 契约 3：字段只增不改含义）。
+fn attach_browser_identity(value: &mut Value) {
+    let identity = status_browser_identity(value);
+    value["browser"] = json!(identity.browser_name());
+    value["browser_label"] = json!(identity.browser_label.clone());
+    value["browser_id"] = json!(identity.browser_id.clone());
+    value["profile"] = json!(identity.profile_name());
+    value["profile_label"] = json!(identity.profile_label.clone());
+    value["profile_id"] = json!(identity.profile_id.clone());
+    value["browser_summary"] = json!(identity.summary());
+    if identity.browser_name().is_none() {
+        value["browser_unknown_hint"] = json!(if identity.profile_count > 1 {
+            "有多个浏览器/Profile 已连接但没有默认目标：先 atb tabs 确认，或用 --browser/--profile 明确目标"
+        } else {
+            "尚未确定正在操作的浏览器：扩展未连接或没有默认目标；先运行 atb tabs 或 atb open <url>"
+        });
+    } else if identity.browser_label.is_none() {
+        value["browser_unknown_hint"] =
+            json!("扩展未上报可读浏览器标识（browser_label）；browser 已回落到 browser_id");
+    }
+}
+
+// 可观测性：WS 鉴权现状（只增字段，不改任何信任判定逻辑）。
 ///
 /// 优先用 daemon `/health` 的 `ws_security`（daemon 读的是同一份 `ws-trust.json`，
 /// 还知道配置是否损坏）；daemon 没跑时退回**只读**本地文件 + `ATB_WS_TRUST_MODE`，
@@ -370,10 +510,10 @@ pub(crate) fn print_logs(tail: usize) -> Result<()> {
     Ok(())
 }
 
-/// 只从文件尾部按块倒读，凑够 `tail` 行就停：日志涨到几百 MB 时不必整份读进内存。
+// 只从文件尾部按块倒读，凑够 `tail` 行就停：日志涨到几百 MB 时不必整份读进内存。
 ///
 /// 返回 `(lines, truncated)`：`truncated=true` 表示文件里还有更早的内容没返回
-/// （把它写进 JSON，调用方不用靠「行数 == tail」猜）。
+// 。
 pub(crate) fn tail_lines(path: &Path, tail: usize) -> Result<(Vec<String>, bool)> {
     use std::io::{Seek, SeekFrom};
 
@@ -642,7 +782,18 @@ pub(crate) fn tcp_listening(port: u16) -> bool {
 
 pub(crate) fn cmd_status(is_async: bool) -> Result<()> {
     reject_async_if_set("status", is_async)?;
-    print_json(status_value()?);
+    let value = status_value()?;
+    // stdout 仍是纯 JSON；人读的一行只进 stderr，不影响 JSON / 退出码。
+    // 注意这里打印的是 `browser_summary`：既有 `summary` 是健康分类枚举。
+    let human_summary = value
+        .get("browser_summary")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    print_json(value);
+    if let Some(summary) = human_summary {
+        use std::io::Write;
+        let _ = writeln!(io::stderr(), "→ {summary}");
+    }
     Ok(())
 }
 
@@ -742,10 +893,10 @@ fn resolve_extension_source_dir() -> Option<PathBuf> {
 /// - 旧 daemon 占端口：先用 netstat/lsof 找 PID；带 `--force` 才真杀（并逐个核对进程
 ///   身份），不带时只打印要执行的命令（杀进程影响面大，必须显式授权）；
 /// - API token 失配：**只有** `/health` 明确返回 `invalid_api_token` 时才删
-///   `~/.atb/api-token`（超时/连接失败都不算），新 daemon 启动时会刷新；
+// `~/.atb/api-token`，新 daemon 启动时会刷新；
 /// - 扩展过旧：只能人工在 chrome://extensions 点「重新加载」，输出带实际路径的指引。
 ///
-/// `dry_run`（全局 `--dry-run`）：只列计划，不杀进程、不删 token。
+// `dry_run`（全局 `--dry-run`）：只列计划，不杀进程、不删 token。
 fn run_doctor_fixes(report: &Value, force: bool, dry_run: bool) -> Vec<Value> {
     let mut results: Vec<Value> = Vec::new();
     // 场景一：端口在监听但 /health 拿不到（旧 daemon 占端口，或 daemon 正忙超时）。
@@ -801,7 +952,7 @@ fn run_doctor_fixes(report: &Value, force: bool, dry_run: bool) -> Vec<Value> {
                         "attempts": attempts.iter().map(KillOutcome::to_json).collect::<Vec<_>>(),
                         "skipped": skipped,
                         "identity_checked": true,
-                        // 两段文案以前是反的（killed_any=true 却说
+                        // ：两段文案以前是反的（killed_any=true 却说
                         // 「未强杀」），与 executed 字段自相矛盾。这里按 killed_any 正向
                         // 生成，并把实际结束的进程数写进文案。
                         "hint": if killed_any {
@@ -1077,6 +1228,126 @@ pub(crate) fn cmd_capabilities(is_async: bool) -> Result<()> {
     }
     print_json(value);
     Ok(())
+}
+
+#[cfg(test)]
+mod browser_identity_tests {
+    use super::*;
+
+    fn health_with_profiles(profiles: Value, active_tabs: u64) -> Value {
+        json!({
+            "ok": true,
+            "running": true,
+            "connection": {
+                "extension_connected": true,
+                "active_tabs": active_tabs,
+                "default_browser_id": "b1",
+                "default_profile_id": "p1",
+                "profiles": profiles,
+            }
+        })
+    }
+
+    #[test]
+    fn identity_prefers_default_profile_flag() {
+        let health = health_with_profiles(
+            json!([
+                {"browser_id":"b1","browser_label":"Chrome 156 · Windows","profile_id":"p1","profile_label":"默认","is_default":true},
+                {"browser_id":"b2","browser_label":"Edge · Windows","profile_id":"p2","profile_label":"工作","is_default":false}
+            ]),
+            3,
+        );
+        let identity = status_browser_identity(&health);
+        assert_eq!(identity.browser_name(), Some("Chrome 156 · Windows"));
+        assert_eq!(identity.profile_name(), Some("默认"));
+        assert_eq!(
+            identity.summary().as_deref(),
+            Some("正在操作：Chrome 156 · Windows（默认，3 tabs）")
+        );
+    }
+
+    #[test]
+    fn identity_uses_default_ids_when_profiles_missing() {
+        // 旧 daemon 没有 profiles[]：只回 id，不伪造 label / summary 里的可读名。
+        let health = json!({
+            "connection": {
+                "active_tabs": 1,
+                "default_browser_id": "b9",
+                "default_profile_id": "p9"
+            }
+        });
+        let identity = status_browser_identity(&health);
+        assert_eq!(identity.browser_name(), Some("b9"));
+        assert_eq!(identity.profile_name(), Some("p9"));
+        assert!(identity.browser_label.is_none());
+    }
+
+    #[test]
+    fn identity_is_empty_when_multiple_profiles_have_no_default() {
+        let health = json!({
+            "connection": {
+                "active_tabs": 2,
+                "profiles": [
+                    {"browser_id":"b1","browser_label":"Chrome","profile_id":"p1","profile_label":"默认"},
+                    {"browser_id":"b2","browser_label":"Edge","profile_id":"p2","profile_label":"工作"}
+                ]
+            }
+        });
+        let identity = status_browser_identity(&health);
+        assert!(identity.browser_name().is_none());
+        assert!(identity.summary().is_none());
+        assert_eq!(identity.profile_count, 2);
+    }
+
+    #[test]
+    fn attach_keeps_existing_summary_and_adds_fields() {
+        let mut value = health_with_profiles(
+            json!([
+                {"browser_id":"b1","browser_label":"Chrome","profile_id":"p1","profile_label":"默认","is_default":true}
+            ]),
+            1,
+        );
+        // 既有健康分类字段：attach 不能覆盖。
+        value["summary"] = json!("ready");
+        value["ok"] = json!(true);
+        attach_browser_identity(&mut value);
+        assert_eq!(value["summary"], "ready");
+        assert_eq!(value["browser"], "Chrome");
+        assert_eq!(value["browser_label"], "Chrome");
+        assert_eq!(value["profile"], "默认");
+        assert_eq!(value["browser_summary"], "正在操作：Chrome（默认，1 tabs）");
+        assert!(value.get("browser_unknown_hint").is_none());
+    }
+
+    #[test]
+    fn attach_reports_unknown_browser() {
+        let mut value = json!({"ok": false, "healthy": false, "summary": "daemon_not_running"});
+        attach_browser_identity(&mut value);
+        assert!(value["browser"].is_null());
+        assert!(value["browser_summary"].is_null());
+        assert!(value["browser_unknown_hint"]
+            .as_str()
+            .unwrap()
+            .contains("尚未确定正在操作的浏览器"));
+        assert_eq!(value["summary"], "daemon_not_running");
+    }
+
+    #[test]
+    fn attach_reports_missing_label() {
+        let mut value = json!({
+            "connection": {
+                "active_tabs": 1,
+                "profiles": [{"browser_id":"b1","profile_id":"p1","is_default":true}]
+            }
+        });
+        attach_browser_identity(&mut value);
+        assert_eq!(value["browser"], "b1");
+        assert!(value["browser_label"].is_null());
+        assert!(value["browser_unknown_hint"]
+            .as_str()
+            .unwrap()
+            .contains("browser_label"));
+    }
 }
 
 #[cfg(test)]

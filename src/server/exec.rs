@@ -83,28 +83,31 @@ pub(crate) async fn exec(
 /// `GET /exec-result/:exec_id`：取回迟到结果。
 ///
 /// 命中即取走（消费语义，避免同一结果被反复读到误判页面状态）；未命中返回
-/// `found:false` —— 可能从未迟到，也可能已超过 5 分钟 TTL。响应里的
-/// `found` / `result` / `error` / `ttl_seconds` 全部是新增字段，不影响既有契约。
+/// `found:false` —— 可能从未迟到，也可能已超过 TTL（`ATB_EXEC_RESULT_TTL_SEC`，
+/// 默认 3600s）。响应里的 `found` / `result` / `error` / `ttl_seconds` 全部是
+/// 新增字段，不影响既有契约。
 pub(crate) async fn exec_result(
     State(state): State<AppState>,
     AxumPath(exec_id): AxumPath<String>,
 ) -> Json<Value> {
     let mut late = state.late_results.lock().await;
     let now = Instant::now();
+    // 每次请求读取 TTL：清理判定与回包里的 ttl_seconds 必须同源。
+    let ttl = late_result_ttl();
     // 顺带清理过期项，保持集合规模受在途执行数约束。
-    late.retain(|_, (_, at)| now.duration_since(*at) < LATE_RESULT_TTL);
+    late.retain(|_, (_, at)| now.duration_since(*at) < ttl);
     match late.remove(&exec_id) {
         Some((value, _)) => Json(json!({
             "ok": true,
             "found": true,
             "result": value.get("result").cloned().unwrap_or(Value::Null),
             "error": value.get("error").cloned().unwrap_or(Value::Null),
-            "ttl_seconds": LATE_RESULT_TTL.as_secs(),
+            "ttl_seconds": ttl.as_secs(),
         })),
         None => Json(json!({
             "ok": true,
             "found": false,
-            "ttl_seconds": LATE_RESULT_TTL.as_secs(),
+            "ttl_seconds": ttl.as_secs(),
         })),
     }
 }
@@ -138,6 +141,11 @@ pub(crate) async fn exec_value(
         &target_options,
     )
     .await?;
+    // 2026-11-13：CLI 侧跳过了本地 JS 配平检查时在结果里留痕，
+    // 便于调用方区分「浏览器接受了这段脚本」与「本地检查误报被绕过」。
+    if req.no_preflight {
+        result["no_preflight"] = json!(true);
+    }
     // 预算：`--max-bytes` 显式给了就优先（`0` 表示不限，历史语义），没给就用
     // daemon 侧默认 `ATB_EXEC_MAX_BYTES`。直连 API 的调用方从来不传
     // --max-bytes，旧实现等于完全不截断——一条 exec 就能把几百 MB 回包甩给客户端。
@@ -443,7 +451,7 @@ pub(crate) async fn execute_raw_js_inner(
     options: &ExecTargetOptions,
     hold_lock: bool,
 ) -> Result<ExecWithSession> {
-    // 请求级 deadline。以前 `timeout` 只管最后等回包的那一次 `timeout`：
+    // 请求级 deadline。以前 `timeout` 只管最后等回包的那一次 `timeout()`：
     // 冷启动等会话（最多 12s）+ 等 driver 读锁 + 等会话串行锁（可能被一条长命令
     // 占很久）全都不计入，`--timeout 5` 实际能跑 30s 以上，调用方早已断开，
     // 而 daemon 还在为这条已废弃的请求排队 —— 排到后照样派发，动作照常执行
@@ -633,15 +641,24 @@ pub(crate) async fn execute_raw_js_inner(
             // 超时必须作为失败返回：旧行为返回 ok:true + 一段提示字符串，
             // 智能体会误判成功并继续下一步，页面状态已经错乱。
             let detail = if acked {
-                "ACK received, script may still be running; 可增大 --timeout 或改用 --async"
+                "ACK received, script may still be running; 可增大 --timeout 或改用 --async。\
+                 若目标长期在后台，Chrome 可能已冻结该标签（内存节省），先 `atb focus --tab <id>` 再重试"
             } else {
                 "no ACK, script may not have been delivered"
             };
-            // 错误里带上 exec_id 与查询指引。请求被 take 之后扩展若晚到
-            // 回包，结果会暂存 5 分钟，可凭 GET /exec-result/:id 查回，不再丢失。
+            // 错误里带上 exec_id 与查询指引。请求被 take 之后扩展若
+            // 晚到回包，结果会暂存 `ATB_EXEC_RESULT_TTL_SEC`（默认 3600s），可凭
+            // GET /exec-result/:id 或 `atb job result <exec_id>` 查回。
+            let ttl_sec = crate::settings::exec_result_ttl_sec();
+            let ttl_text = if ttl_sec.is_multiple_of(60) {
+                format!("{} 分钟内有效", ttl_sec / 60)
+            } else {
+                format!("{ttl_sec} 秒内有效")
+            };
             Err(anyhow!(
                 "exec_timeout: 页面在 {:.1}s 内没有返回结果（{detail}）。exec_id={exec_id}；\
-                 结果可能已通过 GET /exec-result/{exec_id} 查询（5 分钟内有效）",
+                 结果可能已通过 GET /exec-result/{exec_id} 查询（{ttl_text}），\
+                 或运行 `atb job result {exec_id} --wait 60`",
                 timeout.as_secs_f64()
             ))
         }
@@ -653,7 +670,7 @@ pub(crate) async fn execute_raw_js_inner(
     })
 }
 
-/// 超时 / 取消后向扩展发一条 `cancel` 帧（best-effort，不等回包）。
+// 超时 / 取消后向扩展发一条 `cancel` 帧（best-effort，不等回包）。
 ///
 /// 为什么要绕开 `extension_control`：该函数会走 `execute_raw_js_on_tab`，需要
 /// 会话锁 + 一次完整往返；而调用点恰恰是「预算已耗尽、串行锁可能仍被本请求持有」，

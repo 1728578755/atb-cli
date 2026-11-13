@@ -296,7 +296,7 @@ pub(crate) fn create_symlink_dir(source: &Path, target: &Path) -> Result<()> {
 /// `ATB_ALLOW_RELATIVE_OUT=1`：广播时保留相对输出路径（旧行为）。
 ///
 /// 默认 false：与 open/screenshot 的同步/异步路径一致，先把 `out`/`files`/`dir`
-/// 等路径绝对化再下发。对应 CLI flag `--allow-relative-out` 由 args 侧补。
+// 等路径绝对化再下发。对应 CLI flag `--allow-relative-out` 由 args 侧补。
 fn allow_relative_out() -> bool {
     crate::settings::allow_relative_out()
 }
@@ -444,7 +444,7 @@ fn download_suggestion(target: &str) -> Option<&'static str> {
     }
 }
 
-/// 下载文件名净化（同因）。
+// 下载文件名净化。
 ///
 /// 文件名会被扩展拼进 `${dir}/${fileName}`，不净化等于把路径穿越能力交给调用方。
 /// strict（默认）：只接受 basename，拒绝分隔符 / 绝对路径 / `..` / Windows 保留名；
@@ -620,7 +620,7 @@ pub(crate) fn run_target_command(
         "timeout": args.timeout,
         "frame_id": args.frame,
     });
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan(op, &payload, is_async)? {
         return Ok(());
     }
@@ -660,7 +660,7 @@ pub(crate) fn run_fill_command(args: FillCommandArgs, is_async: bool) -> Result<
         "timeout": args.timeout,
         "frame_id": args.frame,
     });
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan("fill", &payload, is_async)? {
         return Ok(());
     }
@@ -695,7 +695,7 @@ pub(crate) fn run_send_keys_command(args: SendKeysCommandArgs, is_async: bool) -
         "wait_interval": args.wait_interval,
         "timeout": args.timeout,
     });
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan("send-keys", &payload, is_async)? {
         return Ok(());
     }
@@ -728,13 +728,32 @@ pub(crate) fn run_screenshot_command(args: ScreenshotArgs, is_async: bool) -> Re
         "quality": args.quality,
         "full_page": args.full_page,
         "max_height_px": args.max_height,
+        // 截图前等待。字段缺省（null）时 daemon 保持旧行为（不等待）。
+        // `--network-idle` 不带值时 clap 给 0，必须原样传 0（daemon 用配置默认静默窗口）。
+        "settle_ms": args.settle_ms,
+        "wait_selector": args.wait_selector,
+        "network_idle": args.network_idle,
+        // CDP 不可用时直接失败，禁止回落到 captureVisibleTab / 整页拼接。
+        "require_cdp": args.require_cdp,
         "timeout": args.timeout,
     });
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan("screenshot", &payload, is_async)? {
         return Ok(());
     }
     ensure_server()?;
+    // 截图前的等待不会计入 daemon 的 `timeout`（selector 等待与 settle 是
+    // 串行追加的），CLI 的 HTTP 预算必须把它们算进来，否则 daemon 还在等、
+    // CLI 先把连接断掉，调用方看到的是没有 error_code 的网络错误。
+    let settle_secs = args
+        .settle_ms
+        .unwrap_or_else(crate::settings::screenshot_settle_ms) as f64
+        / 1000.0;
+    let network_idle_secs = match args.network_idle {
+        Some(0) => crate::settings::screenshot_network_idle_ms() as f64 / 1000.0,
+        Some(ms) => ms as f64 / 1000.0,
+        None => 0.0,
+    };
     if is_async {
         print_json(submit_job("screenshot", payload)?);
     } else {
@@ -745,7 +764,7 @@ pub(crate) fn run_screenshot_command(args: ScreenshotArgs, is_async: bool) -> Re
             args.tab.as_deref(),
             args.browser.as_deref(),
             args.profile.as_deref(),
-            http_budget(args.timeout),
+            http_budget(args.timeout + settle_secs + network_idle_secs + 5.0),
         )?;
     }
     Ok(())
@@ -764,7 +783,7 @@ pub(crate) fn run_save_pdf_command(args: SavePdfArgs, is_async: bool) -> Result<
         "max_height_px": args.max_height,
         "timeout": args.timeout,
     });
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan("save-pdf", &payload, is_async)? {
         return Ok(());
     }

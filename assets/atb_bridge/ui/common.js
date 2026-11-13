@@ -12,10 +12,20 @@
     uiDensity: 'standard',
     showBadge: false,
     clipboardTtlSec: 30,
+    /** `inject --persist` 的默认过期时间（秒）；永久驻留必须由 CLI 显式确认。 */
+    persistTtlSec: 7200,
   };
+
+  // 下拉框只提供离散档位；storage 里出现非法值时回到默认值，不在 UI 上静默夹紧。
+  const PERSIST_TTL_VALUES = [1800, 7200, 28800, 86400];
 
   const MSG_TTL_OK_MS = 4000;
   const msgTimers = new WeakMap();
+
+  function normalizePersistTtl(value) {
+    const n = Number(value);
+    return PERSIST_TTL_VALUES.includes(n) ? n : DEFAULTS.persistTtlSec;
+  }
 
   /**
    * 把底层异常映射成用户能行动的中文提示。
@@ -312,6 +322,8 @@
 
   window.ATB = {
     DEFAULTS,
+    PERSIST_TTL_VALUES,
+    normalizePersistTtl,
     friendlyError,
     send,
     setMsg,

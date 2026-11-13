@@ -82,7 +82,7 @@ pub fn optimize_html_for_tokens(html: &str) -> String {
         // 超限**不继续优化**：直接给纯文本降级结果，并显式标注原因。
         //
         // 丢弃前必须先迭代拆链：`RcDom` 的节点是 `Rc<Node>`，直接让它离开作用域会沿
-        // children 递归析构，深链/宽树都可能把栈打爆（同一类问题）。
+        // children 递归析构，深链/宽树都可能把栈打爆。
         discard_subtree(&dom.document);
         return format!("[html nodes > 200k] {}", strip_tags(html));
     }
@@ -117,7 +117,7 @@ fn count_nodes(root: &Handle) -> usize {
 ///
 /// 不解析 DOM、不递归，栈深度恒定为 1。
 ///
-/// 旧实现只做「< 到 > 之间一律丢弃」，于是 `<script>` / `<style>` /
+// 旧实现只做「< 到 > 之间一律丢弃」，于是 `<script>` / `<style>` /
 /// `<textarea>` 的**内容**被原样当成正文，注释内容也会混进来；同时不解码实体。
 /// 现在用同一条 O(n) 扫描跳过这些元素的整段内容与注释，并解码常见实体。
 /// 仍然不建 DOM：降级路径的定位是「超限时还能读」，不是「精确还原」。
@@ -237,7 +237,7 @@ fn decode_entities(text: &str) -> String {
 /// - 命中阈值时只丢弃该节点的子树，不改变其余输出，正常页面的产物与之前逐字节一致。
 const MAX_DOM_DEPTH: usize = 512;
 
-/// 是否保留 `<script>` / `<style>` 的内容。
+// 是否保留 `<script>` / `<style>` 的内容。
 ///
 /// 默认 `false`：这两个元素的子树对「页面内容理解」没有价值，却经常占掉
 /// 优化后 HTML 的大半 token。需要调试页面脚本时用 `ATB_HTML_KEEP_SCRIPTS=on` 打开。
@@ -381,7 +381,7 @@ fn clean_node_at(handle: &Handle, depth: usize, keep: bool) {
             }
         }
     }
-    // 先迭代摘链再丢弃，避免深子树在 Drop 时递归爆栈（与 同一口径）。
+    // 先迭代摘链再丢弃，避免深子树在 Drop 时递归爆栈。
     let children = handle.children.borrow().clone();
     let mut drop_any = false;
     for child in children {

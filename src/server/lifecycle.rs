@@ -143,7 +143,7 @@ pub(crate) async fn cleanup_on_shutdown(state: &AppState) -> Value {
         let mut execs = state.execs.lock().await;
         let pending_count = execs.pending.len();
         let active_exec_count = execs.active.len();
-        // 不能只 `clear` —— 那会让在途命令的 oneshot 发送端随条目一起
+        // 不能只 `clear()` —— 那会让在途命令的 oneshot 发送端随条目一起
         // 被丢弃，调用方只看到泛化的 RecvError/超时，既不知道「是 daemon 关机」，
         // 也无法据此决定重试。drain 后逐个补一条结构化错误再丢弃。
         let pending: Vec<crate::protocol::PendingExec> =

@@ -59,7 +59,7 @@ pub(crate) fn image_pdf(jpeg: &[u8], width_px: u32, height_px: u32) -> Result<Im
     } else {
         (height_pt / max_page_pt).ceil() as usize
     };
-    // 均分而不是「前 页满、最后一页只剩一条」：均分后每页高度一致，
+    // 均分而不是「前 N-1 页满、最后一页只剩一条」：均分后每页高度一致，
     // 阅读器里翻页观感稳定，也避免出现 1pt 高的碎页。
     let page_height_pt = height_pt / pages as f64;
 

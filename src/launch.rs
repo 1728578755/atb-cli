@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 /// 外部命令（tasklist / powershell / ps / which）的最长等待时间。
 ///
 /// 这些命令都在「动手杀进程 / 确认进程是否还在」的关键路径上：一旦卡住（WMI 卡死、
-/// 杀软拦截），调用方会无限期挂着。默认 5s 上限，超时就当查询失败处理。
-/// 可用 `ATB_PROC_CMD_TIMEOUT_MS` 调整（100..=60000）。
+// 杀软拦截），调用方会无限期挂着。默认 5s 上限，超时就当查询失败处理。
+// 可用 `ATB_PROC_CMD_TIMEOUT_MS` 调整。
 fn command_timeout() -> Duration {
     let millis = crate::settings::proc_cmd_timeout_ms();
     Duration::from_millis(millis)
@@ -33,7 +33,7 @@ fn command_timeout() -> Duration {
 ///
 /// 旧实现硬编码 900ms：慢机 / 冷启动下浏览器还没完成初始化就被判定为「参数没生效」，
 /// 或者反之太快把转发误判成失败。默认 800ms，可用 `ATB_LAUNCH_SETTLE_MS` 调整
-/// （0..=10000）。
+// 。
 fn launch_settle() -> Duration {
     let millis = crate::settings::launch_settle_ms();
     Duration::from_millis(millis)
@@ -264,7 +264,7 @@ pub struct Executed {
 
 /// 启动失败的类别。
 ///
-/// `run` 过去对所有 `execute` 失败都套同一句「确认装了扩展」的 hint，
+// `run()` 过去对所有 `execute()` 失败都套同一句「确认装了扩展」的 hint，
 /// 但真正的原因可能是枚举进程失败、新进程立刻退出、或关闭旧实例失败。按类别给
 /// 「下一步做什么」的提示，才不会再把人往错方向带。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -596,7 +596,7 @@ fn spawn_detached(plan: &Plan) -> Result<std::process::Child> {
 
 /// 校验 `ATB_BROWSER_EXE`：必须是**普通文件**，而且当前平台能把它当程序执行。
 ///
-/// 为什么不能只判 `exists`/`is_file`：
+// 为什么不能只判 `exists()`/`is_file()`：
 /// - 目录、文本文件、符号链接目标缺失的路径都能通过 `exists()`，直到 `spawn` 才失败；
 ///   那时浏览器会话、临时 profile 都已经准备好，错误位置离真正原因很远；
 /// - `is_file()` 只解决「是目录」这一种，Windows 上把 `chrome.txt` 之类的非可执行
@@ -640,8 +640,8 @@ fn validate_browser_exe(path: &Path) -> Result<()> {
     {
         use std::os::unix::ffi::OsStrExt;
         // `access(X_OK)` 用**当前进程的真实 uid/gid** 判断，比「任意一个执行位」准确：
-        // 0644 root 文件、或 ACL 允许但 mode 位不匹配的文件，旧判定会给出相反结论。
-        // 拿不到 C 字符串时退回 mode 位近似。
+        // 0644 root 文件、或 ACL 允许但 mode 位不匹配的文件，旧判定会给出相反结论
+        //。拿不到 C 字符串时退回 mode 位近似。
         let executable = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
             Ok(value) => {
                 // SAFETY: `value` 以 NUL 结尾且在调用期间存活。
@@ -733,7 +733,7 @@ pub fn resolve_exe(kind: Kind) -> Result<PathBuf> {
             command.arg(name);
             if let Some(output) = run_with_timeout(&mut command, command_timeout()) {
                 if output.status.success() {
-                    // 不再 `from_utf8_lossy`：非 路径会被替换成 U+FFFD，随后
+                    // 不再 `from_utf8_lossy`：非 UTF-8 路径会被替换成 U+FFFD，随后
                     // spawn 必然报「文件不存在」，错误位置远离真实原因。
                     if let Some(path) = path_from_which_output(&output.stdout) {
                         return Ok(path);
@@ -802,10 +802,10 @@ fn wsl_browser_candidates(kind: Kind) -> Vec<PathBuf> {
     bases.into_iter().map(|base| base.join(relative)).collect()
 }
 
-/// 把 `which` 的原始 stdout 转成 PathBuf，全程不经过。
+/// 把 `which` 的原始 stdout 转成 PathBuf，全程不经过 UTF-8。
 ///
-/// 旧实现 `String::from_utf8_lossy` 会把非 字节替换成 U+FFFD，得到的路径
-/// 一定不存在。这里只取第一行并裁掉首尾 ASCII 空白。
+/// 旧实现 `String::from_utf8_lossy` 会把非 UTF-8 字节替换成 U+FFFD，得到的路径
+// 一定不存在。这里只取第一行并裁掉首尾 ASCII 空白。
 #[cfg(all(unix, not(target_os = "macos")))]
 fn path_from_which_output(stdout: &[u8]) -> Option<PathBuf> {
     use std::ffi::OsStr;
@@ -1671,7 +1671,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn which_output_keeps_non_utf8_paths() {
-        // 非 字节不能被替换成 U+FFFD，否则返回的路径一定不存在。
+        // 非 UTF-8 字节不能被替换成 U+FFFD，否则返回的路径一定不存在。
         let mut raw = b"/opt/chr".to_vec();
         raw.push(0xFF);
         raw.extend_from_slice(b"ome\n");

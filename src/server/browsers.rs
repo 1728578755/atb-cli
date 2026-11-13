@@ -33,7 +33,7 @@ static SNAPSHOT_REFRESHED_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mut
 
 /// 枚举当前所有 (browser, profile) 目标；每个组合取一个代表标签页。
 ///
-/// 代表标签 = **数值最小的 tab_id**。旧实现取 `sessions.first`，
+// 代表标签 = **数值最小的 tab_id**。旧实现取 `sessions.first()`，
 /// 而 `groups` 的 value 来自 `HashMap::values()` 的迭代顺序——同一份状态多跑两次
 /// 可能给出不同的代表标签，`atb browsers` 的输出因此不可复现。
 pub(crate) async fn browser_targets(state: &AppState) -> Vec<BrowserTarget> {

@@ -4,11 +4,11 @@ use clap::{Args, Parser, Subcommand};
 
 /// 用户主目录（`~` 展开用）。
 ///
-/// 以前是「HOME → USERPROFILE」，与 daemon 的启动 cwd（`dirs::home_dir`）
+// 以前是「HOME → USERPROFILE」，与 daemon 的启动 cwd（`dirs::home_dir()`）
 /// 是两套口径。Windows/Git-Bash/WSL 下 `HOME` 常被改成别的目录，于是 `--out ~/x`
 /// 与 daemon 侧解析出的 `~` 指向不同位置。
 ///
-/// 现在统一走 `config::home_dir`（建立的唯一解析入口，内部即
+// 现在统一走 `config::home_dir()`（建立的唯一解析入口，内部即
 /// `dirs::home_dir()`）；`ATB_HOME` 只影响**配置目录**，不再影响 `~` 展开。
 pub(crate) fn home_dir() -> Result<PathBuf> {
     config::home_dir().ok_or_else(|| anyhow!("无法定位用户主目录"))
@@ -159,7 +159,7 @@ pub(crate) fn save_ws_trust_json(path: &Path, value: &Value) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return result;
     }
-    // `ws-trust.json` 可能含握手 token，保护级别必须与
+    // ：`ws-trust.json` 可能含握手 token，保护级别必须与
     // `api-token` 对齐。统一复用 `config::restrict_file_and_backup_acl`
     // （Windows：去继承 ACE + 移除宽松 ACE + 只授权当前用户 SID；`.bak` 同样处理），
     // 不再在 CLI 侧维护第二份 icacls 逻辑。
@@ -339,7 +339,7 @@ pub(crate) fn print_trust_state(
         "extension_ids": ids,
         "token_required": token_required,
         "enforcing": enforcing,
-        // `json!({"path": &Path})` 在非 路径上会 panic（serde 不支持 Path）。
+        // `json!({"path": &Path})` 在非 UTF-8 路径上会 panic（serde 不支持 Path）。
         // 与其它输出口径一致，统一转成 display 字符串。
         "path": path.display().to_string(),
         "message": message,
@@ -363,7 +363,7 @@ pub(crate) fn print_trust_state(
     Ok(())
 }
 
-/// `trust-extension` 的参数互斥/完整性校验。
+// `trust-extension` 的参数互斥/完整性校验。
 ///
 /// 抽出来的原因：以前 `--dry-run` 只校验了 `--remove` 与 `--token` 冲突两项，
 /// 于是 `--list --clear`、`--clear <id>`、空参数在 dry-run 下都返回 `ok:true`，

@@ -1,5 +1,5 @@
 {
-  "//": "平台清单唯一真相源（PKG-17）。scripts/sync-version.mjs、scripts/package-platform.mjs、npm/bin/atb.js、scripts/platforms.mjs（供 publish.yml 生成 matrix）都从这里读；新增/删除平台只改这一处 + 真实构建机。",
+  "//": "平台清单唯一真相源。scripts/sync-version.mjs、scripts/package-platform.mjs、npm/bin/atb.js、scripts/platforms.mjs（供 publish.yml 生成 matrix）都从这里读；新增/删除平台只改这一处 + 真实构建机。",
   "//libc": "null 表示不限制 libc；linux 只发 glibc（Alpine/musl 走自编译），所以写 \"glibc\"。",
   "registry": "https://registry.npmjs.org",
   "platforms": [

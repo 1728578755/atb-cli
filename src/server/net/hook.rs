@@ -1,11 +1,11 @@
 use super::*;
 
-/// 旧版本（未按 profile 隔离）使用的固定注入名，仅用于清理残留。
+// 旧版本（未按 profile 隔离）使用的固定注入名，仅用于清理残留。
 pub(crate) const LEGACY_NET_HOOK_NAME: &str = "__net_hook";
 
 /// 持久化注入名：扩展侧 `chrome.storage.local.persistInjections` 按字符串键全局存，
 /// 不分 browser/profile。名字必须带 profile 摘要，否则 B 的 `net hook --persist`
-/// 会覆盖 A 的条目，A 的 `net reset` 又会删掉 B 的共享条目。
+// 会覆盖 A 的条目，A 的 `net reset` 又会删掉 B 的共享条目。
 ///
 /// 用 FNV-1a 而不是 `DefaultHasher`：后者不保证跨 Rust 版本稳定，而这个名字会写进
 /// 扩展的持久存储，必须保证 daemon 重启/升级后同一个 profile 还能算出同一个名字。
@@ -53,7 +53,7 @@ pub(crate) async fn install_net_hook(
             "action": "hook",
             "routes": config.get("routes").cloned().unwrap_or_else(|| json!([])),
             "captureBodies": config.get("captureBodies").cloned().unwrap_or(json!(false)),
-            // 再兜一次 clamp：config 可能来自旧版磁盘文件，那里面存的是
+            // 再兜一次 clamp（N1-03）：config 可能来自旧版磁盘文件，那里面存的是
             // 未钳制的原始值；这里按页面默认区间收一次，避免整份日志撑爆注入脚本。
             "maxLog": json!(config
                 .get("maxLog")
@@ -75,6 +75,13 @@ pub(crate) async fn install_net_hook(
             switch_tab_id: Some(session_key.to_string()),
             browser: None,
             profile: None,
+            // 网络 hook 是基础设施，不是用户调试用的临时注入：不受 --persist TTL 约束。
+            ttl_sec: None,
+            persist_forever: true,
+            userscript: false,
+            gm_namespace: None,
+            cleanup_selectors: Vec::new(),
+            cleanup_code: None,
         },
     )
     .await
@@ -98,6 +105,12 @@ pub(crate) async fn remove_injection_named(
             switch_tab_id: Some(session_key.to_string()),
             browser: None,
             profile: None,
+            ttl_sec: None,
+            persist_forever: false,
+            userscript: false,
+            gm_namespace: None,
+            cleanup_selectors: Vec::new(),
+            cleanup_code: None,
         },
     )
     .await

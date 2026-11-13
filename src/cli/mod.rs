@@ -24,7 +24,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 const HOST: &str = "127.0.0.1";
-/// API 端口只有一个真相：`config::CLI_API_PORT`。
+// API 端口只有一个真相：`config::CLI_API_PORT`。
 /// 以前这里的字面量与 config 各自维护，改端口时容易只改一处。
 pub(crate) const PORT: u16 = config::CLI_API_PORT;
 
@@ -54,7 +54,9 @@ pub(crate) mod args;
 pub(crate) mod args_more;
 pub(crate) mod args_net;
 pub(crate) mod cmd_action;
+pub(crate) mod cmd_env;
 pub(crate) mod cmd_io;
+pub(crate) mod cmd_measure;
 pub(crate) mod cmd_net;
 pub(crate) mod cmd_open;
 pub(crate) mod cmd_page;
@@ -63,6 +65,7 @@ pub(crate) mod cmd_schema;
 pub(crate) mod cmd_scrape;
 pub(crate) mod cmd_status;
 pub(crate) mod cmd_tabs;
+pub(crate) mod cmd_target;
 pub(crate) mod exit;
 pub(crate) mod http;
 pub(crate) mod trust;
@@ -108,6 +111,8 @@ pub fn run() -> Result<()> {
     match cli.command {
         CommandKind::Daemon => cmd_open::cmd_daemon(is_async),
         CommandKind::Tabs(args) => cmd_tabs::cmd_tabs(args, is_async),
+        CommandKind::Focus(args) => cmd_target::cmd_focus(args, is_async),
+        CommandKind::Use(args) => cmd_target::cmd_use(args, is_async),
         CommandKind::Tabtree(args) => cmd_tabs::cmd_tabtree(args, is_async),
         CommandKind::Lookup(args) => run_lookup_command(args),
         CommandKind::ProfileLabel(args) => run_profile_label_command(args),
@@ -128,12 +133,14 @@ pub fn run() -> Result<()> {
         CommandKind::Run(args) => cmd_pipeline::cmd_run(args, is_async),
         CommandKind::Batch(args) => cmd_pipeline::cmd_batch(args, is_async),
         CommandKind::Read(args) => cmd_page::cmd_read(args, is_async),
+        CommandKind::Measure(args) => cmd_measure::cmd_measure(args, is_async),
         CommandKind::Find(args) => cmd_page::cmd_find(args, is_async),
         CommandKind::Hover(args) => run_action_command("hover", args, is_async),
         CommandKind::Select(args) => run_action_command("select", args, is_async),
         CommandKind::Check(args) => run_action_command("check", args, is_async),
         CommandKind::Scroll(args) => run_action_command("scroll", args, is_async),
         CommandKind::Inject(args) => cmd_page::cmd_inject(args, is_async),
+        CommandKind::Userscript(args) => cmd_measure::cmd_userscript(args, is_async),
         CommandKind::Browsers => cmd_open::cmd_browsers(is_async),
         CommandKind::Launch(args) => run_launch(args),
         CommandKind::Broadcast(args) => run_broadcast(args),
@@ -159,6 +166,8 @@ pub fn run() -> Result<()> {
         CommandKind::Close(args) => cmd_open::cmd_close(args, is_async),
         CommandKind::Scrape(args) => cmd_scrape::cmd_scrape(args, is_async),
         CommandKind::Status => cmd_status::cmd_status(is_async),
+        CommandKind::Env(args) => cmd_env::cmd_env(args, is_async),
+        CommandKind::Extensions(args) => cmd_env::cmd_extensions(args, is_async),
         CommandKind::Logs(args) => print_logs(args.tail),
         CommandKind::Schema(args) => cmd_schema::cmd_schema(args, is_async),
         CommandKind::Capabilities => cmd_status::cmd_capabilities(is_async),
@@ -269,10 +278,17 @@ fn reject_async_if_unsupported(command: &CommandKind, is_async: bool) -> Result<
         CommandKind::Logs(_) => "logs",
         // net 各子动作都没有 job 实现，统一在分发层拒绝。
         CommandKind::Net(_) => "net",
-        // 这两条命令既不接收也不实现 --async。以前落到 `_ => Ok()`，
+        // 这两条命令既不接收也不实现 --async。以前落到 `_ => Ok(())`，
         // 全局 flag 被静默吞掉：调用方以为拿到了 job_id，实际拿到的是同步结果。
         CommandKind::InstallSkill(_) => "install-skill",
         CommandKind::TrustExtension(_) => "trust-extension",
+        // 2026-11-13：这些新命令不走 job 通道，显式拒绝而不是静默吞掉 flag。
+        CommandKind::Focus(_) => "focus",
+        CommandKind::Use(_) => "use",
+        CommandKind::Env(_) => "env",
+        CommandKind::Extensions(_) => "extensions",
+        CommandKind::Measure(_) => "measure",
+        CommandKind::Userscript(_) => "userscript",
         _ => return Ok(()),
     };
     reject_async_if_set(name, is_async)

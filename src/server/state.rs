@@ -22,16 +22,16 @@ pub(crate) const WAIT_SESSIONS_ACTION: Duration = Duration::from_secs(5);
 pub(crate) const ACK_TRACK_LIMIT: usize = 4096;
 /// 「已请求过扩展重载」登记表的上限：键是 `browser_id:version`，旧版本不会回流。
 pub(crate) const EXT_RELOAD_TRACK_LIMIT: usize = 256;
-/// POST 幂等回放缓存的保留时间：只覆盖「响应丢失后立刻重发」的窗口。
+// POST 幂等回放缓存的保留时间：只覆盖「响应丢失后立刻重发」的窗口。
 pub(crate) const IDEMPOTENCY_TTL: Duration = Duration::from_secs(60);
 /// 幂等回放缓存的兜底上限：防异常客户端用随机 key 灌爆内存，超出淘汰最旧一项。
 pub(crate) const IDEMPOTENCY_CACHE_LIMIT: usize = 512;
-/// 同一幂等键的并发重发最多等多久。
+// 同一幂等键的并发重发最多等多久。
 ///
 /// 超过这个时间说明首个请求要么卡住要么已经异常消失：调用方必须自己决定
 /// 「继续等」还是「换个检查方式」，绝不能在等待后静默重放一次未完成的执行。
 ///
-/// 这只是**兜底值**。请求体里带 `timeout` 时，真正的上限由
+// 这只是**兜底值**。请求体里带 `timeout` 时，真正的上限由
 /// [`idempotency_inflight_wait`] 按「命令超时 + 余量」派生（夹到
 /// [`IDEMPOTENCY_INFLIGHT_WAIT_MIN`]..=[`IDEMPOTENCY_INFLIGHT_WAIT_MAX`]），
 /// 否则 600s 的动作在 90s 就被判超时，重发必然拿到 504。
@@ -46,13 +46,13 @@ pub(crate) const IDEMPOTENCY_INFLIGHT_WAIT_MAX: Duration = Duration::from_secs(6
 /// 超过它 / 拿不到 `Content-Length`（流式上传）时**不读体**，直接把请求原样放行
 /// 且不缓存：能执行，只是失去「响应丢失后回放」的保护。
 pub(crate) const IDEMPOTENCY_BODY_LIMIT: usize = 4 * 1024 * 1024;
-/// 幂等中间件愿意读进内存的响应体上限（16MB）。
+// 幂等中间件愿意读进内存的响应体上限。
 ///
 /// 超过它的响应**不缓存但原样透传**：大页面 `snapshot` / `exec` 的 `js_return`
 /// 落在这个区间，把正文换成空体等于"动作执行了、结果丢了"，比不回放更糟。
 pub(crate) const IDEMPOTENCY_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 
-/// 幂等缓存里的一项。
+// 幂等缓存里的一项。
 ///
 /// 旧实现只有 `(Instant, Value)`：同一 key 的第二个请求在首个请求**还在执行**时
 /// 查不到任何东西，于是又执行一遍——幂等键在最需要它的窗口（并发重发 / CLI 超时后
@@ -100,20 +100,20 @@ pub(crate) struct WsConn {
     /// `/reload-trust` 用它复核"连接建立之后 token 才收紧"这类变更。
     pub(crate) token_fingerprint: Option<u64>,
     pub(crate) revoked: Arc<AtomicBool>,
-    /// 这条连接登记过的会话 key。
+    // 这条连接登记过的会话 key。
     ///
     /// 以前只有 socket 循环内部的局部 `registered_ids`，`refresh_tabs_via_extension`
     /// 自己攒一份、函数返回就丢——于是"首次由 refresh 登记的会话"在 WS 断开时
     /// 永远不会被标成断开，`/health.ready` 谎报、空闲自杀也永远判不出可退出。
     /// 放进连接登记表后，refresh 与断开路径共享同一份清单。
     ///
-    /// 类型是 `HashSet`：连接是长命的，标签反复开关时 `Vec` 只增不减，
+    // 类型是 `HashSet`：连接是长命的，标签反复开关时 `Vec` 只增不减，
     /// 而且每次登记都要做一次线性查重。断开清理末尾会把本连接登记的项整体回收。
     pub(crate) session_registry: Arc<std::sync::Mutex<HashSet<String>>>,
     /// 握手时创建的下行通道。断开清理时用它和会话上的 `sender` 比对
     /// （`same_channel`），避免扩展重载时新旧连接互相踩。
     ///
-    /// 有界通道（容量 `ws_outbound_max`）。发送必须走
+    // 有界通道（容量 `ws_outbound_max()`）。发送必须走
     /// `send_downstream`，让「队列满」变成结构化 `ws_backpressure` 而不是无限积压。
     pub(crate) sender: mpsc::Sender<String>,
 }
@@ -152,15 +152,15 @@ pub struct AppState {
     /// 已经主动要求过重载的 (browser_id, 版本)，避免版本没变时反复触发。
     pub(crate) ext_reload_sent: Arc<Mutex<HashSet<String>>>,
     /// profile label 变更的串行锁：查重与写回之间隔着一次最长 10s 的扩展往返，
-    /// 只用读写锁挡不住两个并发请求同时通过查重。
+    // 只用读写锁挡不住两个并发请求同时通过查重。
     pub(crate) profile_label_lock: Arc<Mutex<()>>,
-    /// net 配置落盘的 per-profile 串行锁。
+    // net 配置落盘的 per-profile 串行锁。
     ///
     /// 旧实现是一把全局锁：两个 profile 的并发 net 命令排同一条队列，每轮最多等
     /// `NET_RMW_LOCK_WAIT`，叠加后调用方预算先耗尽。现在 map 只用来取/建各自的
     /// `Arc<Mutex<()>>`（瞬时持锁，不跨 await），真正串行的是 per-profile 的那把。
     /// 落盘仍是「后台线程读盘 → 合并当前 profile → 写回」，读-改-写之间必须有锁，
-    /// 否则两个 profile 的并发保存会互相覆盖。
+    // 否则两个 profile 的并发保存会互相覆盖。
     pub(crate) net_persist_lock: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     pub(crate) started_at: SystemTime,
     pub(crate) last_activity: Arc<Mutex<Instant>>,
@@ -171,7 +171,7 @@ pub struct AppState {
     /// 「最近一次有请求进来」的时刻：**每条**请求进入 `track_inflight` 时刷新，
     /// 计数回到 0 时清空。只给 `monitor_idle_shutdown` 判断「在途请求是不是已经卡死」用。
     ///
-    /// 语义刻意不是「最早一条在途请求的起点」：旧实现只在 0→1 时记起点，
+    /// 语义刻意不是「最早一条在途请求的起点」（A-02）：旧实现只在 0→1 时记起点，
     /// 那条请求离场后时间戳滞留，后续长请求会被提前判死；改成每条请求都刷新之后，
     /// 「`inflight > 0` 且这个时刻已经超过阈值」等价于「阈值时间内没有任何新请求进来」，
     /// 持续重叠的健康流量不会误触发。
@@ -201,29 +201,29 @@ pub struct AppState {
     /// 扩展在 `ext_ready` 里带 `restartSeq`（见 `assets/*/background.js`），
     /// daemon 侧必须记住上一次看到的值才能判断"这次是不是重启"：
     /// 重启意味着扩展侧的 Fetch 拦截状态已经没了，daemon 持有的
-    /// `net_hooks` 必须标记为待重建，否则 `net route` 仍以为规则已生效。
+    // `net_hooks` 必须标记为待重建，否则 `net route` 仍以为规则已生效。
     pub(crate) ext_restart_seq: Arc<Mutex<HashMap<String, u32>>>,
     /// `cleanup_on_shutdown` 是否已经跑过。
     ///
     /// idle / inflight-stall / job-stall 三条退出路径都是「先 cleanup 再
     /// `shutdown.send(())`」，而 `graceful_shutdown` 的闭包还会再调一次，
     /// `/shutdown` handler 也各调一次。没有幂等位就会向扩展重复下发
-    /// `debugClearAll`，把刚重连上的新连接的拦截规则一并清掉。
+    // `debugClearAll`，把刚重连上的新连接的拦截规则一并清掉。
     pub(crate) cleanup_done: Arc<AtomicBool>,
-    /// 扩展最近一次自检上报的 `warnings`。
+    /// 扩展最近一次自检上报的 `warnings`（R-19）。
     ///
     /// 只在非空时覆盖：连上来的旧扩展不发这个字段，不能把已有告警清空。
     pub(crate) ext_warnings: Arc<Mutex<Vec<Value>>>,
-    /// POST 幂等回放缓存：`{agent}|{用户 key}` -> 占位或已完成响应。
+    // POST 幂等回放缓存：`{agent}|{用户 key}` -> 占位或已完成响应。
     ///
     /// 表的键**只到「调用方 + 用户 key」**，指纹（method/path/query/body）存在
     /// 条目内部：只有这样才能在「同一个 key 换了请求体」时识别出冲突并回 409。
     /// 若把指纹也拼进键里，换了 body 就变成另一条缓存项，冲突会静默通过并再执行一次。
     ///
-    /// `Done` 条目同时追加到 `~/.atb/idempotency.jsonl`，daemon 重启时由
+    // `Done` 条目同时追加到 `~/.atb/idempotency.jsonl`，daemon 重启时由
     /// `load_idempotency_cache` 读回（`Pending` 永不落盘）。
     pub(crate) idempotency: Arc<Mutex<HashMap<String, IdempotencySlot>>>,
-    /// 迟到结果暂存：`exec_id` -> (结果/错误, 登记时刻)。
+    // 迟到结果暂存：`exec_id` -> (结果/错误, 登记时刻)。
     ///
     /// 扩展在 pending 已被超时路径 take 掉之后才回包的结果不再静默丢弃，
     /// 5 分钟内可凭 `GET /exec-result/:exec_id` 查回。
@@ -237,7 +237,7 @@ pub(crate) struct AgentTarget {
     pub(crate) session_key: Option<String>,
     /// `open` 之后尚未完成注册的期望会话。
     pub(crate) preferred_key: Option<String>,
-    /// `preferred_key` 的归属智能体。
+    // `preferred_key` 的归属智能体。
     ///
     /// 旧实现只在 `agent == "default"` 时清 `preferred`，于是 A `open` 出的
     /// "待生效会话"会留给下一个没有默认目标的 B：B 的第一条命令直接落到 A 刚打开的
@@ -260,7 +260,7 @@ pub(crate) fn current_agent() -> String {
 /// 所有 `Duration` 构造的统一入口：先过参数护栏再转换。
 ///
 /// `Duration::from_secs_f64` 遇到 NaN / 负数 / >≈5.8e8 秒会 **panic**。
-/// daemon 的超时值来自请求体，命令级校验难免有漏，这里兜最后一道。
+// daemon 的超时值来自请求体，命令级校验难免有漏，这里兜最后一道。
 pub(crate) fn secs(value: f64) -> Duration {
     std::time::Duration::from_secs_f64(crate::preflight::clamp_timeout_seconds(value))
 }
@@ -268,7 +268,7 @@ pub(crate) fn secs(value: f64) -> Duration {
 /// 把 task-local 的调用方身份带进 `tokio::spawn` 出来的任务。
 ///
 /// task-local **不会**随 spawn 继承，任务体里 `current_agent()` 会退回 `"default"`，
-/// 于是 A 智能体的异步任务会落到 B 的默认标签上，且结果里看不出异常。
+// 于是 A 智能体的异步任务会落到 B 的默认标签上，且结果里看不出异常。
 pub(crate) fn with_agent<F>(
     agent: String,
     future: F,
@@ -279,7 +279,7 @@ where
     AGENT_ID.scope(agent, future)
 }
 
-/// POST 幂等回放中间件。
+// POST 幂等回放中间件。
 ///
 /// 旧实现（v9 及以前）有三个互相独立的漏洞：
 /// 1. 缓存键**只有用户给的 key**：同一个 key 换个 route / 换个 body 也会命中旧响应，
@@ -295,13 +295,13 @@ where
 /// - 同 key 同指纹且首个请求仍在执行 → 等它的完成通知（上限见 [`idempotency_inflight_wait`]），
 ///   再回放结果；
 /// - 只对 POST 生效：GET 无副作用，重复请求天然安全；
-/// - 只有「成功的」响应才进缓存：`status >= 400` 或 `ok:false` 视为本次
+// - 只有「成功的」响应才进缓存：`status >= 400` 或 `ok:false` 视为本次
 ///   未成功，释放占位且不缓存，用户修正条件后同 key 重发能真正重跑；
 /// - 幂等键只保证「响应丢失后重发」这一件事，不承担分布式锁的职责。
 ///
 /// 分层位置（见 `build_api_router`）：`require_api_access` **内层**、`track_inflight`
 /// **内层**——即 token 校验之后才进本中间件，未授权请求既不会占位也不会被缓存
-/// （；层序由 `.layer` 的添加顺序保证，见 boot.rs 注释）。
+// （/；层序由 `.layer()` 的添加顺序保证，见 boot.rs 注释）。
 pub(crate) async fn idempotency_replay(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -373,7 +373,7 @@ pub(crate) async fn idempotency_replay(
         SlotDecision::Timeout => return idempotency_inflight_timeout(&key, wait),
         SlotDecision::Lead(notify) => notify,
     };
-    // 占位一旦建立，就必须有人为它收尾。旧的实现只在「正常走到
+    // ：占位一旦建立，就必须有人为它收尾。旧的实现只在「正常走到
     // 函数末尾」时 `yield_slot`，一旦首个请求被取消（CLI 断开、超时、客户端中断）
     // 或 handler panic，槽就永远停在 `Pending`——`Pending` 又刻意不过期，于是同 key
     // 的重发全部等到超时 504，直到 daemon 重启。
@@ -431,7 +431,7 @@ pub(crate) async fn idempotency_replay(
     Response::from_parts(parts, Body::from(bytes))
 }
 
-/// 在途等待上限：`min(600s, 请求体 timeout + 余量)`，夹到 5..=600s。
+// 在途等待上限：`min(600s, 请求体 timeout + 余量)`，夹到 5..=600s。
 ///
 /// 旧实现固定 90s，而动作类命令允许 600s：首个请求还在正常执行时，第二次重发
 /// 就已经 504，正好落在「幂等键最该起作用」的窗口里。余量复用 CLI 的
@@ -452,7 +452,7 @@ fn idempotency_inflight_wait(body: &[u8]) -> Duration {
     Duration::from_secs_f64(secs)
 }
 
-/// 读请求体失败：结构化 400，明确说明「本次未执行」。
+// 读请求体失败：结构化 400，明确说明「本次未执行」。
 fn invalid_request_body(path: &str, err: &impl std::fmt::Display) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -467,7 +467,7 @@ fn invalid_request_body(path: &str, err: &impl std::fmt::Display) -> Response {
         .into_response()
 }
 
-/// 幂等指纹：`agent|method|path|query|body_hash`。
+// 幂等指纹：`agent|method|path|query|body_hash`。
 ///
 /// 用 `DefaultHasher` 而不是引依赖：这里只做「两次请求是不是同一个」的相等比较，
 /// 不做密码学承诺；哈希值只在进程内存里比较，跨版本/跨进程稳定与否都不影响语义。
@@ -588,7 +588,7 @@ fn lookup_idempotency_step(
 
 /// 兜底上限：超出时淘汰最旧的一项。
 ///
-/// **选中 `Pending` 时跳过**（要求）：那些条目有等待者在 `notify` 上挂着，
+// **选中 `Pending` 时跳过**：那些条目有等待者在 `notify` 上挂着，
 /// 删掉它们会让等待者永远收不到完成通知，只能等到等待上限。
 fn evict_one_finished(cache: &mut HashMap<String, IdempotencySlot>) {
     if cache.len() < IDEMPOTENCY_CACHE_LIMIT {
@@ -616,11 +616,11 @@ fn evict_one_finished(cache: &mut HashMap<String, IdempotencySlot>) {
 /// 等待者醒来后按「没有条目」重新抢一次——最坏情况是再执行一次，
 /// 但这比「永远等不到」和「拿一份无法解析的缓存」都更可诊断。
 ///
-/// `status >= 400` 或 `ok:false` 的响应**不缓存**。旧实现把失败也写进
+// `status >= 400` 或 `ok:false` 的响应**不缓存**。旧实现把失败也写进
 /// `Done` 并以 HTTP 200 回放，用户修正条件后用同一个 key 重试只会拿到旧错误，
 /// 而且再也执行不了——幂等键于是变成了「永久失败锁」。
 ///
-/// 序列化与文件追加都移出 tokio 锁。锁内只做 `insert` / `remove`；
+// 序列化与文件追加都移出 tokio 锁。锁内只做 `insert` / `remove`；
 /// 行文本在加锁前生成、写盘在解锁后交给 `spawn_blocking`，否则每个 POST 的收尾
 /// 都会在临界区里做同步 IO，把整个 daemon 的请求串行化。
 async fn yield_slot(
@@ -661,12 +661,12 @@ async fn yield_slot(
     }
 }
 
-/// 这条响应值不值得进幂等缓存。
+// 这条响应值不值得进幂等缓存。
 fn cacheable_response(status: u16, value: &Value) -> bool {
     status < 400 && value.get("ok").and_then(Value::as_bool) != Some(false)
 }
 
-/// 幂等占位的 RAII 守卫。
+// 幂等占位的 RAII 守卫。
 ///
 /// 首个请求可能以三种方式离开而**走不到** `yield_slot`：客户端断开导致 handler
 /// future 被取消、handler panic、以及中间件自身在收尾前早退。`Pending` 刻意不过期
@@ -801,7 +801,7 @@ const IDEMPOTENCY_STORE_FILE: &str = "idempotency.jsonl";
 /// 单条响应体的落盘上限（仅 `full` 模式）：大响应（整页 HTML / base64）会迅速撑大
 /// 文件，而回放窗口只有 60s，写进磁盘的性价比很低。
 const IDEMPOTENCY_PERSIST_BODY_LIMIT: usize = 256 * 1024;
-/// 启动读取上限：按行流式读，最多读这么多字节 / 行。
+// 启动读取上限：按行流式读，最多读这么多字节 / 行。
 ///
 /// 超过时从**文件尾部**读（保留最新记录）并截断：旧实现是 `read_to_string`，
 /// 一个被灌大的 `idempotency.jsonl` 会在启动瞬间整份读进内存，慢启动甚至 OOM。
@@ -816,7 +816,7 @@ static IDEMPOTENCY_APPEND_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new()
 /// 运行期文件上限：`ATB_IDEMPOTENCY_FILE_MAX_MB`（1..=512，默认 32）。
 ///
 /// 超过就触发一次 compact（tmp + rename，只保留未过期条目），而不是让长驻
-/// daemon 把文件无限追加下去。
+// daemon 把文件无限追加下去。
 fn idempotency_file_max_bytes() -> u64 {
     crate::settings::idempotency_file_max_mb() * 1024 * 1024
 }
@@ -831,7 +831,7 @@ fn idempotency_store_path() -> Option<PathBuf> {
         .map(|dir| dir.join(IDEMPOTENCY_STORE_FILE))
 }
 
-/// 旧版本（之前）的落盘行**没有 `status` 字段**。
+// 旧版本的落盘行**没有 `status` 字段**。
 ///
 /// `serde(default)` 会给 `u16` 补 0，而读取侧把 `0` 当坏行跳过——升级后一夜间
 /// 所有跨进程回放都静默失效。缺省值必须是 200（当时只有成功响应会落盘）。
@@ -850,14 +850,14 @@ struct PersistedIdempotency {
     key: String,
     scope: String,
     at: u64,
-    /// 缺省 200 而不是 0：见 [`default_status_200`]。
+    // 缺省 200 而不是 0：见 [`default_status_200`]。
     #[serde(default = "default_status_200")]
     status: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body: Option<Value>,
 }
 
-/// 把一条记录序列化成一行（含换行）；`value` 为 `None` 时只写元数据。
+// 把一条记录序列化成一行（含换行）；`value` 为 `None` 时只写元数据。
 fn encode_idempotency_record(
     cache_key: &str,
     scope: &str,
@@ -884,10 +884,10 @@ fn encode_idempotency_record(
     }
 }
 
-/// 按落盘策略准备一行文本（这一步在锁**外**做，可能包含大 JSON 序列化）。
+// 按落盘策略准备一行文本。
 ///
 /// - `off`：不落盘；
-/// - `redacted`（默认）：只写 `{key, scope, at, status}`，不写响应体；
+// - `redacted`（默认）：只写 `{key, scope, at, status}`，不写响应体；
 /// - `full`：写完整响应，但超过 [`IDEMPOTENCY_PERSIST_BODY_LIMIT`] 的仍跳过。
 fn prepare_persist_line(
     cache_key: &str,
@@ -927,7 +927,7 @@ fn prepare_persist_line(
     Some((path, line))
 }
 
-/// 把准备阶段生成的行异步写盘：调用方已经释放幂等锁。
+// 把准备阶段生成的行异步写盘：调用方已经释放幂等锁。
 fn persist_line_async(path: PathBuf, line: String) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
@@ -940,7 +940,7 @@ fn persist_line_async(path: PathBuf, line: String) {
     }
 }
 
-/// 加锁追加一行；超过文件上限时顺手 compact 一次。
+// 加锁追加一行；超过文件上限时顺手 compact 一次。
 fn persist_line_blocking(path: &Path, line: &str) {
     // 进程内串行化：不使用 tokio 锁（这里已经在阻塞线程，且绝不能再 await）。
     let _guard = idempotency_append_lock()
@@ -1041,7 +1041,7 @@ fn append_idempotency_record(
 /// 尽力而为的加速缓存，磁盘上出现半行（写一半被杀）完全正常，不能因此让 daemon
 /// 起不来。返回的条目已按 TTL 过滤，且不超过 `IDEMPOTENCY_CACHE_LIMIT` 条。
 ///
-/// 改为 `BufReader` 逐行读取（原来 `read_to_string` 无上限）。文件超过
+// 改为 `BufReader` 逐行读取（原来 `read_to_string` 无上限）。文件超过
 /// [`IDEMPOTENCY_LOAD_MAX_BYTES`] 时从尾部对齐到行边界后再读，保留最新的记录；
 /// 行数也设上限。截断时记一条 warning，绝不因此失败。
 fn read_persisted_idempotency(path: &Path, now: u64) -> Vec<PersistedIdempotency> {
@@ -1149,7 +1149,7 @@ fn read_persisted_idempotency(path: &Path, now: u64) -> Vec<PersistedIdempotency
 
 /// 把落盘条目装回内存表。`at` 换算成 `Instant` 后，后续 TTL 语义与首次执行完全一致。
 ///
-/// `redacted` 模式写下的行没有 `body`，**不可回放**——跳过并计数，
+// `redacted` 模式写下的行没有 `body`，**不可回放**——跳过并计数，
 /// 由调用方决定是否提示。内存缓存本身不受落盘策略影响。
 fn restore_idempotency_entries(
     cache: &mut HashMap<String, IdempotencySlot>,
@@ -1219,7 +1219,7 @@ pub(crate) async fn load_idempotency_cache(state: &AppState) {
         return;
     };
     // 运行期阈值用它来判断是否需要压缩；同时把「当前文件大小」记进近似计数器，
-    // 后续追加只做 fetch_add（不再每条请求 stat）。
+    // 后续追加只做 fetch_add。
     let limit = idempotency_file_max_bytes();
     let file_len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
     IDEMPOTENCY_FILE_BYTES.store(file_len, Ordering::Relaxed);
@@ -1285,7 +1285,7 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// 验收：Done 条目落盘后能被重新加载、body 一致；过期条目被丢弃；Pending 不落盘。
+    // 验收：Done 条目落盘后能被重新加载、body 一致；过期条目被丢弃；Pending 不落盘。
     #[test]
     fn persisted_entries_survive_reload() {
         let path = temp_store_path("reload");
@@ -1343,7 +1343,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// 验收：恢复出来的条目仍然遵守「同 key 换 body → 409」，不会被误回放。
+    // 验收：恢复出来的条目仍然遵守「同 key 换 body → 409」，不会被误回放。
     #[test]
     fn reloaded_entry_still_rejects_other_fingerprint() {
         let path = temp_store_path("fingerprint");
@@ -1371,7 +1371,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// 要求：加载时超过上限只保留最新的 N 条，避免异常 key 把文件/内存撑大。
+    // 要求：加载时超过上限只保留最新的 N 条，避免异常 key 把文件/内存撑大。
     #[test]
     fn reload_keeps_newest_entries_only() {
         let path = temp_store_path("limit");
@@ -1430,7 +1430,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// 失败响应（4xx/5xx 或 `ok:false`）不进缓存。
+    // 失败响应（4xx/5xx 或 `ok:false`）不进缓存。
     ///
     /// 旧实现把它们也写进 `Done` 并恒以 200 回放：用户修好条件后同 key 重试，
     /// 拿到的还是旧错误，而且永远不会再执行一次。
@@ -1447,7 +1447,7 @@ mod tests {
         assert!(cacheable_response(200, &json!({ "tab": "t1" })));
     }
 
-    /// 在途等待上限从请求体的 `timeout` 派生，而不是固定 90s。
+    // 在途等待上限从请求体的 `timeout` 派生，而不是固定 90s。
     #[test]
     fn inflight_wait_derives_from_body_timeout() {
         // 解析不出 timeout：回落兜底值（90s）。
@@ -1472,7 +1472,7 @@ mod tests {
         assert!(tiny >= IDEMPOTENCY_INFLIGHT_WAIT_MIN && tiny <= IDEMPOTENCY_INFLIGHT_WAIT_MAX);
     }
 
-    /// `redacted` 落盘行不含响应体，读回时视为不可回放。
+    // `redacted` 落盘行不含响应体，读回时视为不可回放。
     ///
     /// 元数据仍然被解析出来（供审计 / 压缩），但绝不能进内存缓存——
     /// 否则「没有 body」会被当成「body 是 null」，回放出一个假响应。
@@ -1501,7 +1501,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// 没有 `status` 字段的旧行必须按 200 读回（缺省 0 会被当坏行丢掉，
+    // 没有 `status` 字段的旧行必须按 200 读回（缺省 0 会被当坏行丢掉，
     /// 升级后跨进程回放会静默失效）。
     #[test]
     fn legacy_records_without_status_are_still_replayable() {
@@ -1536,7 +1536,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// 兼容性：旧版本写下的「带 body」行必须仍能回放（升级不丢缓存）。
+    // 兼容性：旧版本写下的「带 body」行必须仍能回放（升级不丢缓存）。
     #[test]
     fn legacy_records_with_body_still_replay() {
         let path = temp_store_path("legacy");
@@ -1565,7 +1565,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// 构造一条最小可用的会话： 的判据只看 `is_active`，其余字段只需形状正确。
+    /// 构造一条最小可用的会话：判据只看 `is_active()`，其余字段只需形状正确。
     fn test_session(session_key: &str, browser_id: &str, disconnected: bool) -> Session {
         let (sender, _receiver) = mpsc::channel::<String>(64);
         Session {
@@ -1599,7 +1599,7 @@ mod tests {
         }
     }
 
-    /// 验收：两个 browser 同时连着时，默认目标只有「当前默认失效」后才允许改选。
+    // 验收：两个 browser 同时连着时，默认目标只有「当前默认失效」后才允许改选。
     ///
     /// 判据本体在 `ws.rs::should_set_default_session`；测试放在本文件，是因为本子任务
     /// 只被授权在 state.rs 自由新增代码（sessions.rs / ws.rs 仅授权指定点位）。
@@ -1641,7 +1641,7 @@ mod tests {
         assert!(should_set_default_session(&driver, "browser-c:profile:3"));
     }
 
-    /// TTL：6 小时内（1 小时前登记）仍然有效，且设置时一定写时间戳。
+    // TTL：6 小时内（1 小时前登记）仍然有效，且设置时一定写时间戳。
     #[test]
     fn preferred_default_survives_within_ttl() {
         let mut driver = DriverState::default();
@@ -1669,7 +1669,7 @@ mod tests {
         );
     }
 
-    /// TTL：超过 6 小时视为「没有」，并且被真正清掉（key 与时间戳一起清）。
+    // TTL：超过 6 小时视为「没有」，并且被真正清掉（key 与时间戳一起清）。
     #[test]
     fn preferred_default_expires_after_ttl() {
         // 用结构体更新语法而不是「先 default 再逐字段赋值」：clippy 的
@@ -1693,7 +1693,7 @@ mod tests {
         assert!(should_set_default_session(&driver, "browser-b:profile:2"));
     }
 
-    /// 断线时只有「它就是当前默认」且「没有更晚的 preferred」才记下来。
+    // 断线时只有「它就是当前默认」且「没有更晚的 preferred」才记下来。
     ///
     /// 记下来的 preferred 会在重连快照里被 `apply_tabs_snapshot` 消费掉（设回默认 + 清空），
     /// 这条断言守的是「什么时候值得记」这一半；消费那一半是快照路径，属 sessions.rs。

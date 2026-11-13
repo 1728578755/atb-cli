@@ -2,7 +2,7 @@
 //
 // 为什么单独建这份：包装层是用户安装后唯一会执行的 JS，但此前 tests/ 对它零覆盖
 // （`grep -rn "npm/bin" tests/` 无输出），所以「错误分支里引用不存在的变量 → 用户只看到
-// ReferenceError」这类问题在 CI 完全不可见（v6）。
+// ReferenceError」这类问题在 CI 完全不可见。
 //
 // 测试全部在子进程里跑，不装包、不起 daemon：
 //   1. 把 wrapper 复制到临时目录，构造「预编译包缺失 + target/release 不存在」的环境；
@@ -32,12 +32,8 @@ function isolatedWrapper() {
     [
       "Object.defineProperty(process, 'platform', { value: process.env.FAKE_PLATFORM });",
       "Object.defineProperty(process, 'arch', { value: process.env.FAKE_ARCH });",
-      'if (process.report) {',
-      '  // 两个方向都要伪造：只伪造 glibc=1 时，Linux runner 上真实的',
-      '  // glibcVersionRuntime 会漏进来，musl 用例被当成 glibc，断言随之失真。',
-      '  process.report.getReport = () => (process.env.FAKE_GLIBC === "1"',
-      "    ? { header: { glibcVersionRuntime: '2.31' } }",
-      '    : { header: {} });',
+      'if (process.env.FAKE_GLIBC === "1" && process.report) {',
+      "  process.report.getReport = () => ({ header: { glibcVersionRuntime: '2.31' } });",
       '}',
       '',
     ].join('\n'),
@@ -178,7 +174,7 @@ test('dry-run 不因缺原生二进制把安装标成失败', () => {
   assert.match(result.stdout, /dry-run/, `dry-run 应说明跳过了探测，实际 stdout: ${result.stdout}`);
 });
 
-test('非 dry-run 仍严格探测原生二进制（ 不回退）', () => {
+test('非 dry-run 仍严格探测原生二进制', () => {
   const result = runPostinstall({ ATB_PLATFORM_OVERRIDE: 'plan9-x64' });
   assert.equal(result.status, 1, `缺二进制应 exit 1，实际 ${result.status}；stdout: ${result.stdout}`);
   assert.match(result.stderr, /没有找到可执行的 atb 原生二进制/);

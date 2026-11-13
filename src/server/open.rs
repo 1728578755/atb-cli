@@ -39,6 +39,11 @@ pub(crate) async fn open_tab(
                             .get("refresh_error_code")
                             .cloned()
                             .unwrap_or(Value::Null),
+                        // `--wait-for none` / 特殊页面自动跳过的标记。
+                        "wait_for_skipped": entry
+                            .get("wait_for_skipped")
+                            .cloned()
+                            .unwrap_or(Value::Null),
                         "elapsed_ms": entry.get("elapsed_ms").cloned().unwrap_or(Value::Null),
                     })
                 })
@@ -77,6 +82,8 @@ pub(crate) async fn open_tab(
             .get("refresh_error_code")
             .cloned()
             .unwrap_or(Value::Null),
+        // `--wait-for none` / 特殊页面自动跳过等待的标记也透传到统一形状。
+        "wait_for_skipped": entry.get("wait_for_skipped").cloned().unwrap_or(Value::Null),
         "elapsed_ms": started.elapsed().as_millis() as u64,
     }]);
     let mut value = result;
@@ -111,7 +118,7 @@ async fn warm_up_extension(state: &AppState) {
 /// 否则下一条命令找不到新标签；批量打开时交给 `open_many` 收尾统一拉一次，
 /// 否则 N 个并发打开会各自排队刷新，把并发收益吃掉。
 ///
-/// `wait_for`： 的 `--wait-for` 条件（dom-quiet / selector: / text:；
+// `wait_for`： 的 `--wait-for` 条件（dom-quiet / selector: / text:；
 /// `networkidle` 作为 dom-quiet 的兼容别名）。
 /// 打开并注册会话成功后继续等条件满足；条件未满足时该目标 ok:false，
 /// error_code 取真实病因（wait_for_timeout / invalid_wait_for / extension_unavailable），
@@ -123,7 +130,7 @@ pub(crate) async fn open_single(
     wait_for: Option<&str>,
     wait_for_timeout: Option<f64>,
 ) -> Value {
-    // 清理失效默认是「为了让本次 open 能选中执行者会话」的前置动作，属于
+    // TA：清理失效默认是「为了让本次 open 能选中执行者会话」的前置动作，属于
     // 有副作用的状态改写。旧实现清理后所有 early-return（目标解析失败 / 就绪超时 /
     // 扩展报错）都不回滚，用户只是想让 open 失败一次，默认目标却被永久清掉了。
     // 现在把原值快照下来，只有 open 真正成功才保留清理结果。
@@ -267,11 +274,27 @@ async fn open_single_inner(
         "groupTitle": group_title,
     })
     .to_string();
-    let value =
-        match execute_page_js(state, &payload, selector, true, Duration::from_secs(30)).await {
-            Ok(value) => value,
-            Err(err) => return json!({ "ok": false, "error": err.to_string() }),
-        };
+    let value = match execute_page_js(state, &payload, selector, true, Duration::from_secs(30))
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            let message = err.to_string();
+            let special = crate::open_target::special_page_scheme(&resolved.navigation_url);
+            let mut failure = json!({ "ok": false, "error": message });
+            // 特殊页面的失败要能直接告诉调用方「下一步做什么」。
+            if special == Some("chrome-extension") {
+                failure["error_code"] = json!("extension_page_open_failed");
+                failure["hint"] = json!(
+                        "chrome-extension:// 仅支持本工具自己的页面；其它扩展页面会被 Chrome 拒绝（Cannot access a chrome-extension:// URL of different extension）。请手动打开后 `atb tabs` 选择目标"
+                    );
+            } else if special.is_some() {
+                failure["error_code"] = json!("special_scheme_open_failed");
+                failure["hint"] = json!(crate::open_target::BROWSER_RESERVED_SCHEME_HINT);
+            }
+            return failure;
+        }
+    };
     let mut result = normalize_open_result(state, value.clone()).await;
     let opened_tab_id = result
         .get("opened_tab_id")
@@ -403,7 +426,7 @@ async fn open_single_inner(
     }
     if let Some(object) = result.as_object_mut() {
         object.insert("ready".to_string(), json!(ready));
-        // 回显当前隔离档位。`legacy` 下具名 agent 仍会回退到全局默认，
+        // TA：回显当前隔离档位。`legacy` 下具名 agent 仍会回退到全局默认，
         // 调用方只有看到这个字段才知道「没有自己默认目标时可能落到别人的标签」。
         object.insert("isolation".to_string(), json!(session_isolation_label()));
     }
@@ -431,33 +454,70 @@ async fn open_single_inner(
     // --wait-for 条件等待。放在挑战处理之后：挑战页放行后站点往往还要
     // 跳转到真实页面，先等挑战再等条件才符合「打开后内容可用」的直觉。
     // 不带 --wait-for 时这段完全不执行，输出与旧版逐字节一致。
+    //
+    // `--wait-for none|off|skip` 跳过等待；chrome:// / edge:// /
+    // chrome-extension:// / about: / devtools:// 在未显式给条件时也自动跳过，
+    // 显式给条件时用 ATB_OPEN_SPECIAL_WAIT_SEC（默认 3s）而不是 --timeout。
+    let special_page = crate::open_target::is_special_page(&resolved.navigation_url);
+    let wait_plan = normalize_wait_for(wait_for);
+    let wait_budget = effective_wait_for_timeout(
+        wait_for,
+        wait_for_timeout,
+        req.readiness_timeout,
+        special_page,
+    );
+    let tab_created = result
+        .get("opened_tab_id")
+        .and_then(Value::as_str)
+        .is_some();
     let mut wait_outcome: Option<Value> = None;
-    let wait_budget = effective_wait_for_timeout(wait_for, wait_for_timeout, req.readiness_timeout);
-    if let Some(cond) = wait_for {
-        wait_outcome = Some(match expected_session_key.as_deref() {
-            Some(key) if ready => run_wait_for(state, key, cond, wait_budget).await,
-            _ => json!({
-                "condition": cond,
-                "matched": false,
-                "error_code": "wait_for_timeout",
-                "error": "标签页未能就绪，等待条件未执行（open 本身已失败或超时）",
-                "timeout_sec": wait_budget,
-                "waited_ms": 0,
-            }),
-        });
-        let matched = wait_outcome
-            .as_ref()
-            .and_then(|w| w.get("matched"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    let mut wait_skipped: Option<&'static str> = None;
+    match wait_plan {
+        Some(WaitForPlan::Skip) => {
+            // 只确认标签创建成功：ready 不再代表页面可读，用户明确要求不等。
+            wait_skipped = Some("none");
+            if let Some(object) = result.as_object_mut() {
+                object.insert("wait_for".to_string(), json!("none"));
+                object.insert("ready".to_string(), json!(tab_created));
+            }
+        }
+        Some(WaitForPlan::Condition(cond)) => {
+            wait_outcome = Some(match expected_session_key.as_deref() {
+                Some(key) if ready => run_wait_for(state, key, &cond, wait_budget).await,
+                _ => json!({
+                    "condition": cond,
+                    "matched": false,
+                    "error_code": "wait_for_timeout",
+                    "error": "标签页未能就绪，等待条件未执行（open 本身已失败或超时）",
+                    "timeout_sec": wait_budget,
+                    "waited_ms": 0,
+                }),
+            });
+            let matched = wait_outcome
+                .as_ref()
+                .and_then(|w| w.get("matched"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if let Some(object) = result.as_object_mut() {
+                object.insert(
+                    "wait_for".to_string(),
+                    wait_outcome.clone().unwrap_or(Value::Null),
+                );
+                // ready 语义升级：带 --wait-for 时 ready=true 表示「条件已满足」；
+                // 不带时保持旧语义（仅标签可操作，不保证首屏有内容，README 已注明）。
+                object.insert("ready".to_string(), json!(ready && matched));
+            }
+        }
+        None if special_page => {
+            // 特殊页面永远不可能满足 selector/text/networkidle 的常规预算：
+            // 未显式给条件时自动跳过，并如实说明跳过的原因。
+            wait_skipped = Some("special_scheme");
+        }
+        None => {}
+    }
+    if let Some(skipped) = wait_skipped {
         if let Some(object) = result.as_object_mut() {
-            object.insert(
-                "wait_for".to_string(),
-                wait_outcome.clone().unwrap_or(Value::Null),
-            );
-            // ready 语义升级：带 --wait-for 时 ready=true 表示「条件已满足」；
-            // 不带时保持旧语义（仅标签可操作，不保证首屏有内容，README 已注明）。
-            object.insert("ready".to_string(), json!(ready && matched));
+            object.insert("wait_for_skipped".to_string(), json!(skipped));
         }
     }
     let ok = wait_outcome
@@ -486,23 +546,57 @@ async fn open_single_inner(
     response
 }
 
-/// `--wait-for` 的实际等待预算（秒）。
+// `--wait-for` 的规范化结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WaitForPlan {
+    /// `none` / `off` / `skip`：跳过等待，只要标签创建成功。
+    Skip,
+    /// 真正的页面条件（selector: / text: / networkidle / dom-quiet）。
+    Condition(String),
+}
+
+/// `none` / `off` / `skip`（大小写不敏感）表示跳过等待。
+fn is_skip_wait_for(cond: &str) -> bool {
+    matches!(
+        cond.trim().to_ascii_lowercase().as_str(),
+        "none" | "off" | "skip"
+    )
+}
+
+fn normalize_wait_for(raw: Option<&str>) -> Option<WaitForPlan> {
+    let trimmed = raw.map(str::trim).filter(|cond| !cond.is_empty())?;
+    if is_skip_wait_for(trimmed) {
+        Some(WaitForPlan::Skip)
+    } else {
+        Some(WaitForPlan::Condition(trimmed.to_string()))
+    }
+}
+
+// `--wait-for` 的实际等待预算（秒）。
 ///
 /// 优先用 CLI 下发的 `wait_for_timeout`——CLI 已经按同一个值扩了 HTTP 超时，
 /// 服务端若仍用旧口径（`readiness_timeout`），就会出现「服务端还在等、CLI 先断开」。
 /// 夹到 `[0.5, settings::wait_max_total_sec()]`；没有该字段（旧 CLI / 直接打 API）
-/// 时回落到 `readiness_timeout`，行为与修复前一致。非有限值视为未提供。
+/// 时：普通页面回落到 `readiness_timeout`（旧行为），特殊页面回落到
+// `ATB_OPEN_SPECIAL_WAIT_SEC`。
+/// 非有限值视为未提供。
 fn effective_wait_for_timeout(
     wait_for: Option<&str>,
     wait_for_timeout: Option<f64>,
     readiness_timeout: f64,
+    special_page: bool,
 ) -> f64 {
-    if wait_for.is_none() {
-        // 没有 --wait-for 时这个预算不会被消费，保持原值，避免影响其它分支。
-        return readiness_timeout;
+    match normalize_wait_for(wait_for) {
+        None => {
+            // 没有 --wait-for 时这个预算不会被消费，保持原值，避免影响其它分支。
+            return readiness_timeout;
+        }
+        Some(WaitForPlan::Skip) => return 0.0,
+        Some(WaitForPlan::Condition(_)) => {}
     }
     match wait_for_timeout.filter(|value| value.is_finite()) {
         Some(value) => value.clamp(0.5, crate::settings::wait_max_total_sec()),
+        None if special_page => crate::settings::open_special_wait_sec(),
         None => readiness_timeout,
     }
 }
@@ -541,7 +635,7 @@ enum WaitOutcome {
     Extension(String),
 }
 
-/// --wait-for 的条件等待。
+// --wait-for 的条件等待。
 ///
 /// selector/text 复用 exec.rs 的 wait_for_js_condition_with_target（daemon 侧
 /// 轮询注入，后台标签不受 Chrome 定时器节流影响），只调用不修改。
@@ -940,8 +1034,19 @@ pub(crate) async fn open_many(
             .get("matched")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        // `--wait-for none` / 特殊页面自动跳过时，ready 只要求标签创建成功
+        // （不再要求页面条件满足，也没有条件可等）。
+        let wait_skipped = result.get("wait_for_skipped").cloned();
+        let tab_created = result
+            .get("opened_tab_id")
+            .and_then(Value::as_str)
+            .is_some();
         let ok = opened_ok && wait_matched;
-        let ready = ready && wait_matched;
+        let ready = if wait_skipped.is_some() && tab_created {
+            true
+        } else {
+            ready && wait_matched
+        };
         if !ok {
             failed += 1;
         }
@@ -958,11 +1063,17 @@ pub(crate) async fn open_many(
         });
         if wait_info.is_object() {
             entry["wait_for"] = wait_info.clone();
+        } else if wait_info.is_string() {
+            // `--wait-for none` 的跳过标记（字符串）也随条目返回。
+            entry["wait_for"] = wait_info.clone();
+        }
+        if let Some(skipped) = wait_skipped {
+            entry["wait_for_skipped"] = skipped;
         }
         if !ok {
             if !wait_matched {
                 // 条件未满足：错误信息以 wait_for 的为准（里面写了是哪个条件、等多久），
-                // error_code 也用内层的真实病因（invalid_wait_for /
+                // error_code 也用内层的真实病因（：invalid_wait_for /
                 // extension_unavailable / wait_for_timeout 不能一律压成超时）。
                 entry["error"] = wait_info
                     .get("error")
@@ -1043,7 +1154,7 @@ pub(crate) fn refresh_error_code(message: &str) -> &'static str {
     "refresh_failed"
 }
 
-/// `open` 可以直接交给浏览器的特殊 scheme。
+// TA：`open` 可以直接交给浏览器的特殊 scheme。
 ///
 /// `resolve_open_target` 只放行 http/https/file，`about:blank`、`chrome://settings`、
 /// `data:`、`view-source:` 一律报 `unsupported_scheme`——但浏览器本身都能打开它们，
@@ -1100,12 +1211,19 @@ pub(crate) fn resolve_request_target<'a>(
 }
 
 pub(crate) fn open_target_error_json(err: OpenTargetError) -> Value {
-    json!({
+    let hint = err.details.get("hint").cloned();
+    let mut payload = json!({
         "ok": false,
         "error": err.message,
         "error_code": err.code,
         "details": err.details,
-    })
+    });
+    // 特殊 scheme 的错误自带可执行 hint（手动打开 + atb tabs 选择），
+    // 提升到顶层让 CLI / 智能体不用下钻 details 就能看到。
+    if let Some(hint) = hint.filter(|value| !value.is_null()) {
+        payload["hint"] = hint;
+    }
+    payload
 }
 
 pub(crate) fn version_at_least(installed: &str, minimum: &str) -> bool {
@@ -1259,7 +1377,7 @@ pub(crate) fn derive_session_key(
     executor_session_key: &str,
     opened_tab_id: &str,
 ) -> Option<String> {
-    // 解析侧必须用 `splitn(3, ...)`（而不是 `split`）才能兼容旧值——
+    // TA：解析侧必须用 `splitn(3, ...)`（而不是 `split`）才能兼容旧值——
     // 旧版本可能把含 `:` 的 browser_id/profile_id 原样拼进来，多切一刀就会把
     // tabId 当成 profile 的一部分。分量再做一次白名单净化，保证拼出来的新 key
     // 与 `apply_tabs_snapshot` 侧的净化规则一致。
@@ -1281,7 +1399,7 @@ pub(crate) fn derive_session_key(
 mod regression_tests {
     use super::*;
 
-    /// `about:` / `chrome:` / `data:` / `view-source:` 原样交给扩展，
+    // TA：`about:` / `chrome:` / `data:` / `view-source:` 原样交给扩展，
     /// 不做 URL 归一化（`chrome://` 一旦被改写成 http 就再也打不开）。
     #[test]
     fn special_schemes_are_passed_through_unmodified() {
@@ -1309,7 +1427,7 @@ mod regression_tests {
         );
     }
 
-    /// 身份分量只留 `[A-Za-z0-9._-]`，空值补 `unknown`。
+    // TA：身份分量只留 `[A-Za-z0-9._-]`，空值补 `unknown`。
     /// 含 `:` 的值必须被替换掉，否则 `session_key` 的分段解析会错位。
     #[test]
     fn identity_components_are_sanitized() {
@@ -1321,5 +1439,51 @@ mod regression_tests {
             "Edge.Beta-1_2"
         );
         assert!(!sanitize_identity_component("a:b").contains(':'));
+    }
+
+    // `--wait-for none|off|skip`（大小写不敏感）解析为「跳过等待」。
+    #[test]
+    fn wait_for_none_variants_are_skip() {
+        for raw in ["none", "off", "skip", " NONE ", "Skip"] {
+            assert_eq!(
+                normalize_wait_for(Some(raw)),
+                Some(WaitForPlan::Skip),
+                "raw: {raw:?}"
+            );
+        }
+        assert_eq!(normalize_wait_for(None), None);
+        assert_eq!(normalize_wait_for(Some("   ")), None);
+        assert_eq!(
+            normalize_wait_for(Some(" selector:.result ")),
+            Some(WaitForPlan::Condition("selector:.result".to_string()))
+        );
+    }
+
+    // 特殊页面的等待预算优先用 `--wait-for-timeout`，否则用
+    /// `ATB_OPEN_SPECIAL_WAIT_SEC`（而不是 --timeout / readiness_timeout）。
+    #[test]
+    fn special_page_wait_budget_prefers_explicit_then_special_default() {
+        assert_eq!(
+            effective_wait_for_timeout(Some("selector:.x"), Some(1.5), 30.0, true),
+            1.5
+        );
+        assert_eq!(
+            effective_wait_for_timeout(Some("selector:.x"), None, 30.0, true),
+            crate::settings::open_special_wait_sec()
+        );
+        // 普通页面保持旧口径：没有显式预算时用 readiness_timeout。
+        assert_eq!(
+            effective_wait_for_timeout(Some("selector:.x"), None, 30.0, false),
+            30.0
+        );
+        // skip 不消费预算。
+        assert_eq!(
+            effective_wait_for_timeout(Some("none"), Some(5.0), 30.0, true),
+            0.0
+        );
+        assert_eq!(
+            effective_wait_for_timeout(None, None, 30.0, true),
+            30.0 // 没有 --wait-for 时预算不参与，保持调用方传入值
+        );
     }
 }

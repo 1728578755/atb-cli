@@ -8,12 +8,52 @@
 
 | 版本线 | 当前 | 真相源 |
 | --- | --- | --- |
-| CLI / daemon | `0.7.4` | `package.json` / `Cargo.toml` |
+| CLI / daemon | `0.8.0` | `package.json` / `Cargo.toml` |
 | CLI ↔ daemon API 协议 | `5` | `atb status` |
-| Chrome 扩展 | `5.4.2` | `assets/atb_bridge/manifest.json` |
+| Chrome 扩展 | `5.5.0` | `assets/atb_bridge/manifest.json` |
 | 扩展 ↔ daemon 消息协议 | `4` | `atb status` |
 
 0.3.7 及更早版本、以及重构前的逐条修复记录，见 [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md)。
+
+## [0.8.0] - 2026-11-13
+
+截至 2026-11-13，CLI 仍为 `0.8.0`；扩展为 `5.5.0`（扩展消息协议仍为 `4`）。本轮聚焦「测试用户脚本 / 前端页面」链路的可观测性与防误判，全部为向后兼容的加法。
+
+### Added
+
+- **`atb focus`**：把目标标签页切到前台（`--no-window` 只切标签不抢窗口焦点）。后台标签页会暂停 rAF/IntersectionObserver 并节流定时器，`exec` / `screenshot` / `wait` 现在会带 `tab_hidden` / `timers_throttled` 警告与 `focus` 提示（`ATB_HIDDEN_TAB_WARNING=off` 可关）。
+- **`atb use <tab>`**：把当前智能体的默认目标固定到指定标签页；新增 `--tab @latest`（最近打开/连接），与 `@1`（列表第 1 个）区分。
+- **`atb env`**：一次输出浏览器/Profile/扩展版本/标签页摘要/持久注入/警告，默认目标与激活标签排在摘要最前（`--tab` / `--tab-limit` 可调）。
+- **`atb extensions`**：列出已安装扩展（`--include-disabled` 含已停用）；`management` 只作为可选权限，在扩展设置页「高级权限」由用户点击授权。
+- **`atb measure --selector`**：返回 rect、viewport、computed style、可见性与 shadow 路径；`--styles` / `--with-text` 可选，支持 `host >>> inner`，不支持 `@e`（返回 `unsupported_selector`）。
+- **`atb userscript <file-or-url>`**：解析 `==UserScript==` 元数据并打开安装页（`--parse-only` 只解析）。
+- **`inject --userscript`**：注入最小 GM shim（`GM_getValue/GM_setValue/GM_deleteValue/GM_listValues/GM_registerMenuCommand/GM_log/GM_addStyle/GM_info/unsafeWindow`），并支持 `--cleanup-selector` / `--cleanup-file` 清理旧宿主。
+- **持久注入安全阀**：`--persist` 默认 2 小时过期（`--ttl` 可调，扩展设置页的 `persistTtlSec` 也参与默认值）；永久驻留必须 `--persist-forever --i-know-this-is-long-lived`；`--list` 返回 `expires_in_sec` / `warning` / 条目总数。
+- **`inject` 执行结果**：返回 `executed` / `returned` / `threw` / `duration_ms` / `cleanup`；脚本抛错时顶层 `ok:false` + `error_code:inject_script_threw`。
+- **`exec --file a.js --file b.js`**：按顺序拼接；`--file -` 读 stdin；`--max-chars` 作为 `--max-bytes` 的可见别名；`--no-preflight` / `ATB_JS_CHECK=off|warn|strict` 控制本地配平检查；文件错误带绝对路径与大小。
+- **截图等待**：`screenshot --settle-ms`、`--wait-selector`、`--network-idle`、`--require-cdp`；结果新增 `tab_visible`、`captured_tab`、`clip_box`、`degraded`、`warning` / `warnings`。
+- **`wait --dom-stable` / `--network-idle`**：DOM 静默窗口 / 在途 fetch+XHR 归零窗口；`wait --js` 超时返回最近 5 次求值 `last_values`。
+- **`tabs` 过滤与流式输出**：`--url-contains` / `--title-contains` / `--filter` / `--format json|jsonl|tsv`；大列表附 `suggest`。
+- **`console history` / `console tail`**：一次性取回加载期 console/error/unhandledrejection（`--settle-ms` / `--types` / `--clear`），或轮询跟随输出（`--duration` / `--interval` / `--types`）。
+- **`job tail <id>` / `job result <exec_id>`**：JSONL 进度快照（`elapsed_ms` / `last_heartbeat` / `stalled`，`--human` 输出人读行）；超时 exec 的迟到结果可直接取回。
+- **响应身份字段**：单目标页面命令顶层新增 `resolved_target`、`browser`、`profile`、`warnings`、`hint`；`status` 新增 `browser` / `browser_label` / `profile` / `browser_summary` 并向 stderr 打一行「→ 正在操作：…」。
+- **新错误码**：`focus_failed`、`permission_required`、`daemon_outdated`、`syntax_error`、`inject_script_threw`、`unsupported_selector`、`exec_result_not_found`、`cdp_required`、`invalid_encoding`、`script_file_too_large`，全部带 `hint`。
+- **新 `ATB_*` 调参**：`ATB_EXEC_RESULT_TTL_SEC`、`ATB_INJECT_PERSIST_DEFAULT_TTL_SEC`、`ATB_INJECT_PERSIST_MAX_TTL_SEC`、`ATB_BROWSER_BANNER`、`ATB_HIDDEN_TAB_WARNING`、`ATB_OPEN_SPECIAL_WAIT_SEC`、`ATB_SCREENSHOT_SETTLE_MS`、`ATB_SCREENSHOT_NETWORK_IDLE_MS`、`ATB_WAIT_DOM_STABLE_MS`、`ATB_CONSOLE_HISTORY_SETTLE_MS`、`ATB_JS_CHECK`、`ATB_TABS_LARGE_WARNING`、`ATB_JOB_STALL_SEC`、`ATB_SCRIPT_FILE_MAX_MB`。
+- **`open --wait-for none`**：跳过页面条件等待；`chrome://` / `chrome-extension://` / `about:` 等特殊页面默认用 3s 预算（`ATB_OPEN_SPECIAL_WAIT_SEC`），`chrome-extension://` 可打开本工具自己的页面。
+
+### Changed
+
+- `exec` 迟到结果保留时长从 5 分钟延长到 60 分钟（`ATB_EXEC_RESULT_TTL_SEC`，60..86400 秒），超时提示直接给出 `atb job result <exec_id> --wait 60`。
+- 整页截图 clip 改用 `cssContentSize`（CSS px），修复 devicePixelRatio > 1 时按设备像素裁剪、画面横向重复的问题；`--max-height` 仍按设备像素配置。
+- `inject` 失败不再被包成顶层 `ok:true`；脚本抛错保留 `executed:true` 与 `threw`。
+- `tabs --full` / `--mine` 在 `serde(flatten)` 查询路径上的布尔解析修复（旧实现会 HTTP 400）。
+- 扩展设置页新增「调试注入」卡（`persistTtlSec`）与「高级权限」管理授权；popup/options 的 340/420/560 与 1024/1440 对齐统一。
+
+### Fixed
+
+- `--tab @1,@3` / `@1-@3` 逐 token 解析（第二个及之后的 `@` 不再报「不是有效序号」）。
+- 浏览器返回的嵌套脚本错误（`{"error":{"message":"SyntaxError..."}}`）在出口剥成可读文本，并映射 `invalid_js`。
+- `measure` 成功结果不再套一层 `js_return`，多目标回包解包修复。
 
 ## [0.7.4] - 2026-11-06
 
@@ -371,7 +411,8 @@ CLI 为 `0.7.2`，扩展为 `5.3.0`（消息协议仍为 `4`）。本节汇总 0
 
 0.3.x 的最后一个版本。该版本及更早的逐条记录见 [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md)。
 
-[Unreleased]: https://github.com/1728578755/atb-cli/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/1728578755/atb-cli/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/1728578755/atb-cli/compare/v0.7.4...v0.8.0
 [0.7.4]: https://github.com/1728578755/atb-cli/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/1728578755/atb-cli/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/1728578755/atb-cli/compare/v0.7.1...v0.7.2

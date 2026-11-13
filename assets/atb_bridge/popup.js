@@ -34,7 +34,7 @@ let lastStatus = null;
 
 const $ = (id) => document.getElementById(id);
 
-// 的回归：本文件所有反馈都调 toastMsg(元素 id, 文案, 类型, ttl)，
+// v11 的回归：本文件所有反馈都调 toastMsg(元素 id, 文案, 类型, ttl)，
 // 而 ui/common.js 导出的是 ATB.setMsg(元素, ...)。缺这一层时每次反馈都会抛
 // ReferenceError —— 调用点大多在 try 里，表现是「操作成功却报失败」且数据被清空
 // （fetchCookies 的 catch 会把 lastCookieData 清掉），复制后的剪贴板定时清除也不会启动。
@@ -66,6 +66,7 @@ async function init() {
   bindConnectionActions();
   bindIdentityActions();
   bindAppearanceActions();
+  bindDebugSettings();
   bindBadgeToggle();
   bindCookieTools();
   bindClipboardLifecycle();
@@ -141,6 +142,8 @@ function syncSettingsUI(settings) {
   if (badge) badge.checked = settings.showBadge === true;
   const ttl = $('clipboardTtl');
   if (ttl) ttl.value = String(clampTtl(settings.clipboardTtlSec));
+  const persistTtl = $('persistTtlSec');
+  if (persistTtl) persistTtl.value = String(ATB.normalizePersistTtl(settings.persistTtlSec));
 }
 
 function bindAppearanceActions() {
@@ -179,7 +182,29 @@ function bindAppearanceActions() {
       const ttl = $('clipboardTtl');
       if (ttl) ttl.value = String(clipboardTtlSec);
     }
+    if (changed.persistTtlSec != null) {
+      const persistTtl = $('persistTtlSec');
+      if (persistTtl) persistTtl.value = String(ATB.normalizePersistTtl(changed.persistTtlSec));
+    }
   });
+}
+
+/**
+ * 调试注入默认值：persistTtlSec（daemon 未显式给 --ttl 时由扩展读取）。
+ * 默认值由 ui/common.js 的 DEFAULTS 统一提供，popup 与 options 双向同步。
+ */
+function bindDebugSettings() {
+  $('persistTtlSec')?.addEventListener('change', async (event) => {
+    const value = ATB.normalizePersistTtl(event.target.value);
+    event.target.value = String(value);
+    const ok = await ATB.writeSetting('persistTtlSec', value);
+    toastMsg('debugMsg', ok ? `持久注入默认过期时间已保存（${formatPersistTtl(value)}）` : '保存失败：扩展存储不可用', ok ? 'ok' : 'err');
+  });
+}
+
+function formatPersistTtl(sec) {
+  if (sec >= 3600 && sec % 3600 === 0) return `${sec / 3600} 小时`;
+  return `${Math.round(sec / 60)} 分钟`;
 }
 
 function bindHeader() {
@@ -279,6 +304,10 @@ function renderStatus(data) {
     modeSelect.value = data.wsTrustMode === 'strict' ? 'strict' : 'compat';
   }
 }
+
+// ---------------------------------------------------------------------------
+// 角标
+// ---------------------------------------------------------------------------
 
 /**
  * 认证告警。
@@ -505,7 +534,7 @@ function visibleCookies() {
   });
 }
 
-/** 默认只渲染 name + 标记 + 条数，值用 ••• 掩码。 */
+/** 默认只渲染 name + 标记 + 条数，值用 •••。 */
 function renderCookies() {
   const list = $('cookieList');
   const empty = $('cookieEmpty');
@@ -553,6 +582,8 @@ function renderCookies() {
     // 3：掩码只由 cookieRevealed 决定，默认永远是 •••。
     const shown = cookieRevealed ? String(c.value == null ? '' : c.value) : '•••';
     value.textContent = shown;
+    // 列宽固定 + 单行省略：完整值放 title，避免长 cookie 把卡片撑破。
+    value.title = cookieRevealed ? String(c.value == null ? '' : c.value) : '点「显示值」并二次确认后查看';
 
     item.append(name, flags, value);
     fragment.appendChild(item);
@@ -687,7 +718,7 @@ async function copyCookies() {
   armClipboardClear();
 }
 
-/** 复制后启动定时清除（SEC-10）。重复复制时重置计时。 */
+/** 复制后启动定时清除。重复复制时重置计时。 */
 function armClipboardClear() {
   if (clipboardTimer) {
     clearTimeout(clipboardTimer);

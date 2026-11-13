@@ -15,8 +15,8 @@ body.options {
   grid-template-columns: 236px minmax(0, 1fr);
   min-height: 100vh;
   /* 1920/2560 这类宽屏上不再让侧栏贴最左、正文浮在中间的 1100px 处；
-     整个应用收成 1180 居中面板，加左右细边框界定边界。 */
-  max-width: 1180px;
+     整个应用收成 1240 居中面板，加左右细边框界定边界。正文列 960 再居中。 */
+  max-width: 1240px;
   margin: 0 auto;
   background: var(--bg);
   border-inline: 1px solid var(--border);
@@ -31,7 +31,9 @@ body.options {
   flex-direction: column;
   gap: 18px;
   height: 100vh;
-  padding: 18px 12px 14px;
+  /* 顶部 20px 与 .topbar 的 padding-top 一致；品牌块固定 44px，
+     使导航第一项与内容区第一张卡片的顶部基本对齐。 */
+  padding: 20px 12px 14px;
   border-right: 1px solid var(--border);
   background: var(--surface);
 }
@@ -40,6 +42,7 @@ body.options {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 44px;
   padding: 0 8px;
 }
 
@@ -136,11 +139,11 @@ body.options {
   top: 0;
   z-index: 5;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   width: 100%;
-  max-width: 860px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 20px 30px 14px;
   background: linear-gradient(var(--bg) 88%, transparent);
@@ -172,7 +175,7 @@ body.options {
 
 .content {
   width: 100%;
-  max-width: 860px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 4px 30px 48px;
 }
@@ -289,21 +292,23 @@ body.options {
   flex: 0 0 auto;
 }
 
+/* 表单控件统一限宽：普通输入框最大 320px，端口 160px；窄屏下在媒体查询里放开。 */
 .setting-control .input {
-  width: 128px;
+  width: 320px;
+  max-width: 320px;
 }
 
-/* token 比端口长得多，输入框给宽一些，避免只能看到两三个字符。 */
 #tokenInput {
-  width: 240px;
+  width: 320px;
 }
 
 #portInput {
-  width: 104px;
+  width: 160px;
 }
 
 .setting-control .select {
-  width: 190px;
+  width: 220px;
+  max-width: 320px;
 }
 
 .btn-row {
@@ -517,8 +522,10 @@ body.options {
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--text-2);
-  overflow-wrap: anywhere;
-  word-break: break-all;
+  /* 固定表格列宽 + 单行省略：长 cookie 值不把表格撑破；完整值在 title 里。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cell-value.masked {
@@ -662,9 +669,12 @@ body.options {
 
 /* ------------------------------------------------------------- 响应式 */
 
-@media (max-width: 860px) {
+@media (max-width: 900px) {
   .shell {
     grid-template-columns: minmax(0, 1fr);
+    /* 两行网格必须显式定高：默认 stretch 会把 100vh 的空白摊进侧栏行，
+       表现为导航和内容之间出现一大段空白。 */
+    grid-template-rows: auto minmax(0, 1fr);
     max-width: none;
     border-inline: none;
   }
@@ -683,12 +693,17 @@ body.options {
     border-bottom: 1px solid var(--border);
   }
 
+  .side-brand {
+    min-height: 0;
+  }
+
   .nav {
     flex-direction: row;
+    /* 窄屏折叠成顶部导航：允许换行，七项不会互相压住或产生横向滚动条。 */
+    flex-wrap: wrap;
     gap: 4px;
-    overflow-x: auto;
+    overflow: visible;
     padding-bottom: 2px;
-    scrollbar-width: none;
   }
 
   .nav::-webkit-scrollbar {
@@ -741,6 +756,17 @@ body.options {
   .setting-control .select {
     flex: 1 1 160px;
     width: auto;
+  }
+
+  #tokenInput {
+    flex: 1 1 200px;
+    width: auto;
+    max-width: 320px;
+  }
+
+  #portInput {
+    flex: 0 1 160px;
+    width: 160px;
   }
 
   .choice-grid {
@@ -813,6 +839,13 @@ body.options {
 /* 侧栏底部的状态药丸不要被 flex 拉满。 */
 .sidebar-foot {
   align-items: flex-start;
+}
+
+/* 折叠成顶部导航时，底部状态行是横向排列，药丸与版本号按中线对齐。 */
+@media (max-width: 900px) {
+  .sidebar-foot {
+    align-items: center;
+  }
 }
 
 /* 身份分区的重置按钮：和上面的只读标识拉开距离，且用危险色（两次点击确认）。 */

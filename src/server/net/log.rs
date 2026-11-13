@@ -162,7 +162,7 @@ pub(crate) async fn merge_net_log(
     let skip = total.saturating_sub(limit);
     let tail: Vec<Value> = items.into_iter().skip(skip).collect();
     let returned = tail.len();
-    // clearlog 失败不能静默：调用方以为日志清了，下一次 `net log` 又看到
+    // clearlog 失败不能静默（N1-04）：调用方以为日志清了，下一次 `net log` 又看到
     // 同一批旧条目，只会怀疑是不是没清干净。与 `cdp_error` 同形报出来，但不改 `ok`。
     let mut cdp_clear_error: Option<String> = None;
     if clear == Some(true) && cdp_enabled {

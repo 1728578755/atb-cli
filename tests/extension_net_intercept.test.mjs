@@ -3,7 +3,7 @@
 // 目标不是模拟 Chrome，而是把 background.js 原样塞进 node:vm 里跑，
 // 用一个会记录所有 sendCommand 的假 chrome 观察它到底发了什么 CDP 命令。
 // 这样能覆盖「patterns 是否多开了响应阶段」「header 是否整体替换丢头」
-// 「 body 是否正确 base64」这类只有真机才暴露的问题。
+// 「UTF-8 body 是否正确 base64」这类只有真机才暴露的问题。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -288,11 +288,11 @@ async function main() {
       && mockPatterns.some((p) => String(p.urlPattern).includes('api/mock')),
     JSON.stringify(mockPatterns));
 
-  // ---- 3 / 9. 请求阶段伪造响应 + ----
+  // ---- 3 / 9. 请求阶段伪造响应 + UTF-8 ----
   // 重建 harness，再显式下发本组需要的 mock 规则：不依赖用例 1 留下的状态。
   harness = buildHarness();
   const freshStatus = await dispatch({ cmd: 'netIntercept', action: 'status', tabId: 1 });
-  check('重建 harness 后不继承前序规则/日志/统计',
+  check(' 重建 harness 后不继承前序规则/日志/统计',
     freshStatus.ok === true && freshStatus.enabled === false && freshStatus.rules === 0 && freshStatus.logCount === 0,
     JSON.stringify(freshStatus));
   await dispatch({

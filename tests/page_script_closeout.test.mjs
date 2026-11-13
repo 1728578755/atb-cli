@@ -1,21 +1,21 @@
-// 收口轮 · 页面脚本域（pages）回归测试。
+// 轮 · 页面脚本域（pages）回归测试。
 //
 // 覆盖属于 pages 的条目：
-// page_action 的 setValue 内层变量遮蔽外层结果对象 → fill 回包丢 ok
-// B2 / C3find / snapshot / action 顶层 const → 二次注入 SyntaxError
-// page_challenge 仅凭脚本标签就判 interactive → challenge wait 耗满预算
-// A7 （契约 §3.2）wait --js 被 CSP 拒绝时给 wait_js_eval_blocked
+// （v11）page_action 的 setValue 内层变量遮蔽外层结果对象 → fill 回包丢 ok
+// find / snapshot / action 顶层 const → 二次注入 SyntaxError
+// （v11）page_challenge 仅凭脚本标签就判 interactive → challenge wait 耗满预算
+// wait --js 被 CSP 拒绝时给 wait_js_eval_blocked
 // read / snapshot 的 name / placeholder 与 find 同口径掩码
-// D14 page_challenge 不再整页序列化 body.textContent
+// page_challenge 不再整页序列化 body.textContent
 // page_net 的 XHR 三个方法在 install #2 重定基线
 // simphtml 顶层函数收进 IIFE、入口不可枚举且用完即撤
 //
-// 注意：（端口隔离）**不在**本组用例里 —— 契约已改为「daemon 返回 warning +
+// 注意： （端口隔离）**不在**本组用例里 —— 契约已改为「daemon 返回 warning +
 // 文档说明 match pattern 不支持端口」，页面脚本不做端口跳过（多 host 规则集合用单一
 // port 会误跳过其它端口的规则）。
 //
 // 断言口径：不读源码猜逻辑，一律把真实文件放进 vm 执行、观察可验证的行为；
-// 只有「形如某个表达式」的少数一致性检查（三份掩码口径、stealth 的自查清单）
+// 只有「形如某个表达式」的少数一致性检查
 // 用源码正则，因为那三条的产出点各自的 DOM 前置条件差得太远，硬造 stub 反而更脆。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -54,8 +54,7 @@ function baseSandbox(extras = {}) {
   return { sandbox, timers };
 }
 
-// ---------------------------------------------------------------- B2 / C3
-
+// ----------------------------------------------------------------
 /// 三个脚本在扩展通道上都是「每次调用前重新注入」，所以同一 world 里会执行多次。
 ///
 /// 旧实现把常量写成顶层 const/let（page_find.js 的 __ABC_FIND_*、page_snapshot.js 的
@@ -155,7 +154,6 @@ for (const item of REPEAT_CASES) {
 }
 
 // ----------------------------------------------------------------
-
 /// setValue 的内层变量曾经叫 `base`，与外层的结果对象 `const base = {...}` 同名。
 /// 字符串把对象遮蔽之后，末尾 `Object.assign(base, state, { ok:true })` 只是往
 /// String 包装对象上挂属性 —— 经 executeScript 序列化（结构克隆 / JSON 化）就只剩
@@ -247,7 +245,7 @@ test(' setValue 返回的结果必须是可序列化的对象（ok/applied 不�
   assert.equal(wire.tag, 'input');
 });
 
-test(' setValue append 仍以写入前的值为基准（ 不回退）', () => {
+test(' setValue append 仍以写入前的值为基准', () => {
   const { sandbox, input } = actionSandbox();
   const context = vm.createContext(sandbox);
   vm.runInContext(source('page_action.js'), context, { filename: 'page_action.js' });
@@ -260,8 +258,7 @@ test(' setValue append 仍以写入前的值为基准（ 不回退）', () => {
   assert.equal(wire.applied, true);
 });
 
-// ---------------------------------------------------------------- A7
-
+// ----------------------------------------------------------------
 /// page_wait.js 用 `new AsyncFunction(...)` 在页面里编译字符串谓词，等于 eval：
 /// 页面 CSP 禁 unsafe-eval 时必然失败。契约 §3.2 要求这种失败给
 /// error_code=wait_js_eval_blocked（daemon 据此改走 CDP Runtime.evaluate），
@@ -328,7 +325,6 @@ test('wait --js 语法错误：仍然是 js_predicate_compile_failed（不能一
 });
 
 // ----------------------------------------------------------------
-
 function netSandbox() {
   const { sandbox } = baseSandbox();
   const nativeFetch = function nativeFetch() {
@@ -352,7 +348,7 @@ function netSandbox() {
   return { sandbox, nativeFetch, FakeXhr };
 }
 
-test(' install #2 重定 XHR 基线：页面后装的补丁留在调用链上且不成环', () => {
+test('install #2 重定 XHR 基线：页面后装的补丁留在调用链上且不成环', () => {
   const { sandbox, FakeXhr } = netSandbox();
   const context = vm.createContext(sandbox);
   vm.runInContext(source('page_net.js'), context, { filename: 'page_net.js' });
@@ -382,7 +378,7 @@ test(' install #2 重定 XHR 基线：页面后装的补丁留在调用链上且
   assert.equal(pageOpenCalls, 1, '页面自己的 XHR.open 补丁被剪掉了');
 });
 
-// ----------------------------------------------------------------
+// ---------------------------------------------------------------- /
 
 test('规则条数上限：hook 重放最多收 64 条，与 daemon 的 ATB_NET_RULE_MAX_RULES 同口径', () => {
   // 历史实现这里截 50、daemon 管 64：51~64 条规则刷新后被页面静默裁掉，
@@ -420,8 +416,7 @@ test('未超限时不产生 routes_dropped，且规则原样保留', () => {
 });
 
 // ----------------------------------------------------------------
-
-test(' find / read / snapshot 的派生文本掩码口径一致', () => {
+test('find / read / snapshot 的派生文本掩码口径一致', () => {
   // 三份文件各留一份实现、各叫各的名字（不能共享全局，见 page_action.js 头部约定），
   // 所以这里锁的是**口径**：空值 → null，secret 字段非空 → '•••'。
   for (const file of ['page_find.js', 'page_read.js', 'page_snapshot.js']) {
@@ -431,7 +426,7 @@ test(' find / read / snapshot 的派生文本掩码口径一致', () => {
   }
 });
 
-test(' snapshot：口令字段的 name / placeholder 打码并置 redacted，非敏感结构字段保留', () => {
+test('snapshot：口令字段的 name / placeholder 打码并置 redacted，非敏感结构字段保留', () => {
   const { sandbox } = baseSandbox();
   sandbox.CSS = { escape: (value) => String(value) };
   sandbox.getComputedStyle = () => ({ visibility: 'visible', display: 'block', opacity: '1' });
@@ -511,8 +506,7 @@ test(' snapshot：口令字段的 name / placeholder 打码并置 redacted，非
   assert.equal(accountItem.redacted, undefined);
 });
 
-// ---------------------------------------------------------------- D14
-
+// ----------------------------------------------------------------
 test('challenge 正文判定不再整页序列化 body.textContent', () => {
   const code = source('page_challenge.js');
   // 注释里会引用旧写法作反例，比对前先剥掉注释，只看真实代码。
@@ -532,7 +526,6 @@ test('challenge 正文判定不再整页序列化 body.textContent', () => {
 });
 
 // ----------------------------------------------------------------
-
 /// `challenge wait` 的等待条件是「识别出厂商 && interactive && 还没 token」。
 /// 旧实现只要 `scriptHas('recaptcha'|'hcaptcha.com')` 就置 interactive=true ——
 /// 而这两个 api.js 几乎在所有接过风控的站点上都会加载（reCAPTCHA v3 根本不渲染
@@ -634,8 +627,7 @@ test(' 真的有可见挂载点：interactive + widget_pending 中间态', () =>
 });
 
 // ----------------------------------------------------------------
-
-test(' simphtml_opt：顶层函数收进 IIFE，入口不可枚举且用完即撤', () => {
+test('simphtml_opt：顶层函数收进 IIFE，入口不可枚举且用完即撤', () => {
   const { sandbox, timers } = baseSandbox();
   sandbox.document = {};
   const context = vm.createContext(sandbox);
@@ -661,7 +653,7 @@ test(' simphtml_opt：顶层函数收进 IIFE，入口不可枚举且用完即�
   assert.equal('optHTML' in sandbox, false, 'optHTML 留在页面上了');
 });
 
-test(' simphtml_find_list：findMainList 同样收进 IIFE 且不覆盖页面已有的同名全局', () => {
+test('simphtml_find_list：findMainList 同样收进 IIFE 且不覆盖页面已有的同名全局', () => {
   const { sandbox, timers } = baseSandbox();
   sandbox.document = {};
   sandbox.findMainList = 'page-owned';
@@ -681,7 +673,7 @@ test(' simphtml_find_list：findMainList 同样收进 IIFE 且不覆盖页面已
   assert.equal(sandbox.findMainList, 'page-owned', '注入把页面自己的 findMainList 弄丢了');
 });
 
-test(' stealth 的自查清单包含 simphtml 的两个入口（audit 能报、scrub 能删）', () => {
+test('stealth 的自查清单包含 simphtml 的两个入口（audit 能报、scrub 能删）', () => {
   const code = source('page_stealth.js');
   const start = code.indexOf('const OWN_GLOBALS = [');
   const end = code.indexOf('];', start);

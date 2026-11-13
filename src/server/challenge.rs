@@ -14,7 +14,7 @@ pub(crate) struct ChallengeRequest {
     pub(crate) focus_after: Option<f64>,
     /// 兼容字段：旧调用方只认识 `focus`。含义按 action 分叉：
     /// `action=focus` 时等价于 `focus_allow_system`，等待路径里等价于
-    /// `focus_on_need_human`。新调用方应使用下面两个显式字段。
+    // `focus_on_need_human`。新调用方应使用下面两个显式字段。
     #[serde(default)]
     pub(crate) focus: Option<bool>,
     /// `action=focus`：是否允许抢占系统焦点（false = 只切标签、不抢前台窗口）。
@@ -287,7 +287,8 @@ fn approach_screen_point(
 /// 之前的轨迹从 `(x-90, y-60)` 起步，那已经在组件外甚至窗口外，Turnstile 看到的
 /// 是一次「凭空出现」的点击；现在改为从组件左外侧水平滑到目标。
 ///
-/// `diag` 只接收「落点被 clamp」「接近点被缩短」这类几何异常，成功路径不产生噪音。
+/// `diag` 只接收「落点被 clamp」「接近点被缩短」这类几何异常，成功路径不产生噪音
+// 。
 pub(crate) async fn challenge_click_widget(
     state: &AppState,
     session_key: &str,
@@ -401,7 +402,7 @@ pub(crate) fn default_solve_ms(budget: Duration) -> u64 {
     budget.as_millis() as u64
 }
 
-/// 同一窗口的 `tabs switch` 冷却窗口。
+// 同一窗口的 `tabs switch` 冷却窗口。
 ///
 /// 多标签并发求解时，每个求解器都无条件把标签切到前台会互相抢 active tab：
 /// A 切过去、B 又切走，两边的定时器都被 Chrome 节流，最后一起超时。
@@ -413,7 +414,7 @@ fn activate_cooldowns() -> &'static std::sync::Mutex<HashMap<String, Instant>> {
     TABLE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// 把目标标签切成 active 的**唯一入口**。
+// 把目标标签切成 active 的**唯一入口**。
 ///
 /// - `allow_focus=false` 且标签已经是 active：什么也不做（旧实现每次求解都切，
 ///   把别人的 active tab 抢走）；
@@ -483,7 +484,7 @@ pub(crate) async fn challenge_activate_tab(
 
 /// 硬拦截（"Sorry, you have been blocked"）的统一结论。
 ///
-/// 进循环前的预探与等待循环里的每一片都用同一份构造，避免两处字段漂移。
+// 进循环前的预探与等待循环里的每一片都用同一份构造，避免两处字段漂移。
 fn challenge_blocked_verdict(
     session_key: &str,
     action: &str,
@@ -510,7 +511,7 @@ fn challenge_blocked_verdict(
     })
 }
 
-/// 探测不可用时的统一结论（「连续不可用」出口）。
+// 探测不可用时的统一结论。
 fn challenge_probe_failed_verdict(
     session_key: &str,
     action: &str,
@@ -1059,7 +1060,7 @@ pub(crate) async fn challenge_value(state: &AppState, req: ChallengeRequest) -> 
         let clicked = challenge_click_at(state, &session_key, x, y, deadline).await;
         // 取证失败时不能给 `cleared:true`：`Value::Null` 上 token_ready 与 detected
         // 都是 false，旧的 `token_ready || !detected` 恒为真，于是「点了 + 探测不到」
-        // 被说成「挑战已通过」（机制 B）。这里把探测结果单独收起来。
+        // 被说成「挑战已通过」。这里把探测结果单独收起来。
         let status_budget = deadline.saturating_duration_since(Instant::now());
         let (status, status_error, probed) = if status_budget < Duration::from_millis(50) {
             (Value::Null, json!(CLICK_TIMEOUT_CODE), false)
@@ -1411,13 +1412,10 @@ pub(crate) async fn challenge_value(state: &AppState, req: ChallengeRequest) -> 
     let mut activation_diag: Vec<Value> = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        // 只用 deadline 判终止：每片最多 3.5s（再留 0.5s 给 CDP 回包），
+        // 只用 deadline 判终止：每片至少 1ms、最多 3.5s（再留 0.5s 给 CDP 回包），
         // 剩余时间必然收敛。旧实现写死 `injections >= 80`（= 最多 320s），
         // 把 --timeout 600 静默截断成 320s，而且超时后既不说明原因也不报错。
-        //
-        // 余量不足一次往返（< 60ms，低于派发守卫的 50ms）时直接收尾：再派发只会撞上「预算在派发前
-        // 已用尽」的通道错误，把上一片拿到的有效载荷换成一条无信息的错误。
-        if remaining < Duration::from_millis(60) {
+        if remaining.is_zero() {
             break;
         }
         // 给页面侧留一点余量：`timeoutMs` 用满 4s 时，回包正好撞上 CDP 超时。

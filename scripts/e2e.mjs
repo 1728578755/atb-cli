@@ -48,7 +48,7 @@ const KEEP = process.argv.includes('--keep');
 const SMOKE = String(process.env.ATB_E2E || '').toLowerCase() === 'smoke';
 const SMOKE_NAMES = ['basic-flow', 'screenshot', 'spa-wait'];
 
-// 临时目录延迟创建：前置条件不满足时直接退出，不该在 os.tmpdir 里留垃圾。
+// 临时目录延迟创建：前置条件不满足时直接退出，不该在 os.tmpdir() 里留垃圾。
 let TMP_DIR = null;
 function ensureTmpDir() {
   if (!TMP_DIR) TMP_DIR = mkdtempSync(join(tmpdir(), 'atb-e2e-'));
@@ -617,6 +617,10 @@ async function main() {
     } else {
       console.log(`cleanup：未完成（exit=${cleanup.code}）${short(cleanup.stdout || cleanup.stderr)}`);
     }
+    // `server.close()` 只停止接收新连接；scenario 里 CLI/页面留下的 keep-alive
+    // 连接会让 Node 进程一直不退出（表现为「场景全 PASS，但脚本挂住」）。
+    // Node 18.2+ 的 closeAllConnections 主动断开空闲连接。
+    server.closeAllConnections?.();
     server.close();
     if (!KEEP && TMP_DIR) {
       rmSync(TMP_DIR, { recursive: true, force: true });

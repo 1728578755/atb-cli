@@ -298,7 +298,12 @@ pub(crate) fn run_network_command(args: NetworkCommand) -> Result<()> {
 }
 
 pub(crate) fn run_console_command(args: ConsoleCommand) -> Result<()> {
-    ensure_server()?;
+    // History/Tail 各自先做参数校验再 ensure_server（坏参数不应先拉起 daemon）；
+    // 其余子命令沿用「先确保 daemon，再发请求」的旧顺序。
+    match &args.action {
+        ConsoleAction::History(_) | ConsoleAction::Tail(_) => {}
+        _ => ensure_server()?,
+    }
     match args.action {
         ConsoleAction::Start(args) => print_json(request(
             "POST",
@@ -336,6 +341,431 @@ pub(crate) fn run_console_command(args: ConsoleCommand) -> Result<()> {
             ),
             http_budget(args.timeout),
         )?),
+        // 2026-11-13：一次性取回已有 console/error 历史 / 轮询跟随。
+        ConsoleAction::History(args) => run_console_history(args)?,
+        ConsoleAction::Tail(args) => run_console_tail(args)?,
     }
     Ok(())
+}
+
+// 占位函数已由 R5 实现：`console history`。
+///
+/// 一次取回「页面加载期已经产生」的 console / error：
+/// 1. `/console/list` 探测是否已有采集会话；
+/// 2. 没有就 `/console/start`（idempotent），并记住是不是本次启动的；
+/// 3. `--clear` 时先清空缓冲；
+/// 4. 等 `settle_ms` 让 CDP Runtime.enable / Log.enable 回放既有消息；
+/// 5. `/console/list` 取 entries，按 `--types` 本地过滤；
+/// 6. 若采集是本次启动的，采样后 `/console/stop` 恢复原状；原本就在采集绝不停。
+pub(crate) fn run_console_history(args: ConsoleHistoryArgs) -> Result<()> {
+    ensure_server()?;
+    let settle_ms = args
+        .settle_ms
+        .unwrap_or_else(crate::settings::console_history_settle_ms)
+        .min(60_000);
+    let types = parse_console_types(args.types.as_deref());
+    let timeout = http_budget(args.timeout);
+    let selector = json!({
+        "switch_tab_id": args.tab,
+        "browser": args.browser,
+        "profile": args.profile,
+    });
+
+    // 1) 探测：老 daemon 没有顶层 active 时回落到扩展的 status 字段；两者都没有
+    // 就是「未知」（None），后续按「不擅自 stop」处理。
+    let probe = request(
+        "POST",
+        "/console/list",
+        Some(merge_payload(&selector, json!({ "limit": 1 }))),
+        timeout,
+    )?;
+    if probe.get("ok").and_then(Value::as_bool) == Some(false) {
+        print_json(probe);
+        return Ok(());
+    }
+    let active_before = console_active(&probe);
+
+    // 2) 未在采集才 start。扩展的 idempotent start 在已运行时回 already_running，
+    // 用它兜住「探测与 start 之间别人刚好启动了采集」的窗口。
+    let mut started_by_history = false;
+    if active_before != Some(true) {
+        let started = request("POST", "/console/start", Some(selector.clone()), timeout)?;
+        if started.get("ok").and_then(Value::as_bool) == Some(false) {
+            print_json(started);
+            return Ok(());
+        }
+        let already_running = started
+            .get("already_running")
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                started
+                    .pointer("/result/already_running")
+                    .and_then(Value::as_bool)
+            });
+        // 扩展明确回 already_running 时以它为准；没有这个信号（老扩展）时只在
+        // 「探测明确说 stopped」的情况下停。探测未知（None）时保守不停：
+        // console/stop 会清空缓冲，误停别人正在采集的会话代价更高。
+        started_by_history = match already_running {
+            Some(already) => !already,
+            None => active_before == Some(false),
+        };
+    }
+
+    // 3) --clear 必须在采样之前：先清掉旧缓冲，再等 settle 窗口收集新事件。
+    if args.clear {
+        let cleared = request("POST", "/console/clear", Some(selector.clone()), timeout)?;
+        if cleared.get("ok").and_then(Value::as_bool) == Some(false) {
+            let stop_error = if started_by_history {
+                console_stop_quiet(&selector, timeout)
+            } else {
+                None
+            };
+            let mut out = cleared;
+            if let Some(stop_error) = stop_error {
+                out["stop_error"] = json!(stop_error);
+            }
+            print_json(out);
+            return Ok(());
+        }
+    }
+
+    // 4) 采样窗口：Runtime.enable / Log.enable 的回放事件在这段时间内到达。
+    if settle_ms > 0 {
+        sleep(Duration::from_millis(settle_ms));
+    }
+
+    // 5) 取 entries。limit 由 daemon 夹到 1..=500；类型过滤在本地做（大小写不敏感）。
+    let listed = match request(
+        "POST",
+        "/console/list",
+        Some(merge_payload(&selector, json!({ "limit": args.limit }))),
+        timeout,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            if started_by_history {
+                let _ = console_stop_quiet(&selector, timeout);
+            }
+            return Err(err);
+        }
+    };
+    if listed.get("ok").and_then(Value::as_bool) == Some(false) {
+        let stop_error = if started_by_history {
+            console_stop_quiet(&selector, timeout)
+        } else {
+            None
+        };
+        let mut out = listed;
+        if let Some(stop_error) = stop_error {
+            out["stop_error"] = json!(stop_error);
+        }
+        print_json(out);
+        return Ok(());
+    }
+    let entries: Vec<Value> = console_entries(&listed)
+        .into_iter()
+        .filter(|entry| console_entry_matches_types(entry, &types))
+        .collect();
+    let count = entries.len();
+
+    // 6) 只恢复「本次 history 自己启动」的采集；原本就在采集时保持不动。
+    let mut stopped_after = false;
+    let mut stop_error: Option<String> = None;
+    if started_by_history {
+        match console_stop_quiet(&selector, timeout) {
+            None => stopped_after = true,
+            Some(err) => stop_error = Some(err),
+        }
+    }
+
+    let mut result = json!({
+        "entries": entries,
+        "count": count,
+        "settle_ms": settle_ms,
+        "started_by_history": started_by_history,
+        "types": types,
+        "active_before": active_before,
+        "stopped_after": stopped_after,
+    });
+    if let Some(stop_error) = stop_error {
+        result["stop_error"] = json!(stop_error);
+    }
+    print_json(json!({ "ok": true, "result": result }));
+    Ok(())
+}
+
+// 占位函数已由 R5 实现：`console tail`。
+///
+/// 轮询 `/console/list`，把「上一轮没见过」的条目按到达顺序逐行输出：
+/// - 默认 JSONL，一行一个 entry；
+/// - 全局 `--pretty` 时输出人读行 `[ts] level text`；
+/// - 去重键优先用 entry id，否则 `(timestamp, level, text)`；
+/// - 结束时输出一行 `{"tail_finished":true,...}`。
+///
+/// 不新增 daemon 路由；采集本身需要先由 `console start` / `console history` 打开。
+pub(crate) fn run_console_tail(args: ConsoleTailArgs) -> Result<()> {
+    if !args.duration.is_finite() || args.duration < 0.0 {
+        return Err(usage_failure(
+            "invalid_argument",
+            format!(
+                "console tail --duration 必须是非负有限秒数（收到 {}）",
+                args.duration
+            ),
+            "例如 --duration 10；只想取一次历史用 `atb console history`",
+        ));
+    }
+    ensure_server()?;
+    let duration = args.duration.min(3_600.0);
+    let interval = if args.interval.is_finite() {
+        args.interval.clamp(0.05, 5.0)
+    } else {
+        0.5
+    };
+    let types = parse_console_types(args.types.as_deref());
+    let timeout = http_budget(args.timeout);
+    let selector = json!({
+        "switch_tab_id": args.tab,
+        "browser": args.browser,
+        "profile": args.profile,
+    });
+    let deadline = Instant::now() + Duration::from_secs_f64(duration);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut printed = 0usize;
+    let mut active: Option<bool> = None;
+
+    loop {
+        let value = match request(
+            "POST",
+            "/console/list",
+            Some(merge_payload(&selector, json!({ "limit": args.limit }))),
+            timeout,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                // 轮询期的传输错误按「本轮没取到」处理；但已经输出过内容后不能
+                // 把整条命令判成成功，因此直接给出结构化错误并结束。
+                print_json(json!({
+                    "ok": false,
+                    "error": format!("console tail 轮询失败: {err}"),
+                    "error_code": "console_tail_failed",
+                    "hint": "检查 daemon / 扩展连接（atb status）；已输出的日志行仍然有效",
+                }));
+                return Ok(());
+            }
+        };
+        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            print_json(value);
+            return Ok(());
+        }
+        if let Some(current) = console_active(&value) {
+            active = Some(current);
+        }
+        for entry in console_entries(&value) {
+            let key = console_entry_key(&entry);
+            // 先登记再过滤：类型不匹配的条目也要记住，避免它在后续轮次里
+            // 因为过滤条件变化被当成「新增」重复输出。
+            if !seen.insert(key) {
+                continue;
+            }
+            if !console_entry_matches_types(&entry, &types) {
+                continue;
+            }
+            if PRETTY_OUTPUT.load(Ordering::Relaxed) {
+                write_stdout(&console_entry_human(&entry));
+            } else {
+                write_stdout(&serde_json::to_string(&entry).unwrap_or_else(|_| "null".to_string()));
+            }
+            printed += 1;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        sleep(remaining.min(Duration::from_secs_f64(interval)));
+    }
+
+    let mut finished = json!({
+        "tail_finished": true,
+        "duration_sec": duration,
+        "count": printed,
+    });
+    if let Some(active) = active {
+        finished["active"] = json!(active);
+        if !active {
+            finished["hint"] = json!(
+                "console 采集当前未启动：先 `atb console start`（或 `atb console history`）再 tail"
+            );
+        }
+    }
+    write_stdout(&serde_json::to_string(&finished).unwrap_or_else(|_| "{}".to_string()));
+    Ok(())
+}
+
+/// 把公共的标签选择字段与额外字段合并成一个请求体。
+fn merge_payload(base: &Value, extra: Value) -> Value {
+    let mut payload = base.clone();
+    if let Value::Object(extra) = extra {
+        if let Some(map) = payload.as_object_mut() {
+            map.extend(extra);
+        }
+    }
+    payload
+}
+
+/// `/console/list` 的采集状态：优先顶层 `active`（本轮 daemon 新增），
+/// 老 daemon 回落到扩展的 `result.status`；都没有时返回 None（未知）。
+fn console_active(value: &Value) -> Option<bool> {
+    value.get("active").and_then(Value::as_bool).or_else(|| {
+        value
+            .pointer("/result/status")
+            .and_then(Value::as_str)
+            .map(|status| status == "started")
+    })
+}
+
+/// 从 `/console/list` 回包里取 entries（扩展的 `logs` 数组）。
+fn console_entries(value: &Value) -> Vec<Value> {
+    value
+        .pointer("/result/logs")
+        .or_else(|| value.pointer("/result/result/logs"))
+        .or_else(|| value.get("logs"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// `--types` 解析：逗号分隔、trim、小写；空项丢弃。
+pub(crate) fn parse_console_types(spec: Option<&str>) -> Vec<String> {
+    spec.map(|spec| {
+        spec.split(',')
+            .map(|item| item.trim().to_ascii_lowercase())
+            .filter(|item| !item.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// 类型过滤：`error/warn/log/info/debug/rejection` 对 entry 的 level/type/kind
+/// 做大小写不敏感**包含**匹配（`warn` 命中 `warning`）。空 types 表示不过滤。
+///
+/// `rejection` 额外匹配文本里的 `rejection` / `unhandled`：CDP 把 unhandled
+/// promise rejection 归到 `Runtime.exceptionThrown`（level=error），扩展没有
+/// 独立的 type 字段，只看 level/type 会让 `--types rejection` 恒为空。
+pub(crate) fn console_entry_matches_types(entry: &Value, types: &[String]) -> bool {
+    if types.is_empty() {
+        return true;
+    }
+    let fields: Vec<String> = ["level", "type", "kind"]
+        .iter()
+        .filter_map(|key| entry.get(*key).and_then(Value::as_str))
+        .map(|value| value.to_ascii_lowercase())
+        .collect();
+    let text = entry
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    types.iter().any(|needle| {
+        fields.iter().any(|field| field.contains(needle.as_str()))
+            || (needle == "rejection"
+                && (text.contains("rejection")
+                    || text.contains("unhandled")
+                    || text.contains("uncaught")))
+    })
+}
+
+/// 去重键：优先 entry id，否则 `(timestamp, level, text)`。
+fn console_entry_key(entry: &Value) -> String {
+    if let Some(id) = entry.get("id").and_then(Value::as_str) {
+        return format!("id:{id}");
+    }
+    let timestamp = entry
+        .get("timestamp")
+        .or_else(|| entry.get("ts"))
+        .map(Value::to_string)
+        .unwrap_or_default();
+    let level = entry
+        .get("level")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // 扩展当前的日志条目没有 type；保留该维度让未来新增的 type 不互相去重。
+    let kind = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let text = entry.get("text").and_then(Value::as_str).unwrap_or("");
+    format!("{timestamp}\u{1f}{level}\u{1f}{kind}\u{1f}{text}")
+}
+
+/// `--pretty` 时的人读行：`[timestamp] level text`。
+fn console_entry_human(entry: &Value) -> String {
+    let level = entry.get("level").and_then(Value::as_str).unwrap_or("log");
+    let text = entry.get("text").and_then(Value::as_str).unwrap_or("");
+    match entry.get("timestamp").or_else(|| entry.get("ts")) {
+        Some(timestamp) => format!("[{timestamp}] {level} {text}"),
+        None => format!("[{level}] {text}"),
+    }
+}
+
+/// 尽力停止 console 采集；成功返回 None，失败返回原因（不抛错）。
+fn console_stop_quiet(selector: &Value, timeout: f64) -> Option<String> {
+    match request("POST", "/console/stop", Some(selector.clone()), timeout) {
+        Ok(value) if value.get("ok").and_then(Value::as_bool) != Some(false) => None,
+        Ok(value) => Some(
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("console/stop 失败")
+                .to_string(),
+        ),
+        Err(err) => Some(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    // `--types` 大小写不敏感、支持逗号分隔；`warn` 命中 `warning`。
+    #[test]
+    fn console_types_filter_is_case_insensitive_and_contains() {
+        let types = parse_console_types(Some(" Error , WARN ,rejection"));
+        assert_eq!(types, vec!["error", "warn", "rejection"]);
+        let warn = json!({ "level": "warning", "text": "deprecated" });
+        let error = json!({ "level": "error", "text": "boom" });
+        let log = json!({ "level": "log", "text": "hi" });
+        assert!(console_entry_matches_types(&warn, &types));
+        assert!(console_entry_matches_types(&error, &types));
+        assert!(!console_entry_matches_types(&log, &types));
+    }
+
+    /// 空 types 表示不过滤；`type`/`kind` 字段同样参与匹配；unhandled rejection
+    /// 在扩展里只有 level=error + 文本，`rejection` 需要兜底匹配文本。
+    #[test]
+    fn console_types_empty_or_alternate_fields() {
+        let entry = json!({ "level": "info", "type": "unhandledrejection", "text": "x" });
+        assert!(console_entry_matches_types(&entry, &[]));
+        let types = parse_console_types(Some("rejection"));
+        assert!(console_entry_matches_types(&entry, &types));
+        let text_only = json!({ "level": "error", "text": "Uncaught (in promise) Error: x" });
+        assert!(console_entry_matches_types(&text_only, &types));
+        assert!(!console_entry_matches_types(
+            &json!({ "level": "debug", "text": "x" }),
+            &types
+        ));
+    }
+
+    /// 去重键优先 id，否则 (timestamp, level, text)。
+    #[test]
+    fn console_entry_key_prefers_id() {
+        let with_id = json!({ "id": "e1", "timestamp": 1, "level": "log", "text": "a" });
+        assert_eq!(console_entry_key(&with_id), "id:e1");
+        let first = json!({ "timestamp": 1.5, "level": "log", "text": "a" });
+        let second = json!({ "timestamp": 1.5, "level": "log", "text": "a" });
+        let different = json!({ "timestamp": 1.5, "level": "error", "text": "a" });
+        assert_eq!(console_entry_key(&first), console_entry_key(&second));
+        assert_ne!(console_entry_key(&first), console_entry_key(&different));
+    }
 }

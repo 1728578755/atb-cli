@@ -55,7 +55,7 @@ let wsPort = DEFAULT_WS_PORT;
 // 可选的 WebSocket 鉴权 token（对应 daemon 的 <用户配置目录>/ws-trust.json）。
 // 空串 = 不启用：此时连接 URL 与历史版本一字不差，绝不改变默认行为。
 let wsToken = '';
-// 信任档位（方案 C）：compat（默认，与历史行为完全一致）| strict。
+// 信任档位：compat（默认，与历史行为完全一致）| strict。
 // strict 下「无 token 的连接」只放行只读命令，高危命令（exec / cdp / cookies / inject…）
 // 返回结构化拒绝 —— 端口被本机其它进程抢占时，最多只能看到浏览器状态，拿不到会话与任意脚本执行。
 // 注意：真正的对端身份校验必须由 daemon 侧完成（core-ws 的 ATB_WS_TRUST_MODE），
@@ -477,23 +477,336 @@ async function handlePageOp(msg) {
   }
 }
 
-/// 在指定目标里执行用户代码，语义与 exec 一致（支持 return / 裸表达式 / await）。
-async function runUserCodeInTab(tabId, code, world, target) {
-  const result = await chrome.scripting.executeScript({
-    target: target || { tabId },
-    // 小写 isolated 也必须进隔离世界；无法识别时按注入的历史默认 MAIN。
-    world: normalizeWorld(world) || 'MAIN',
-    func: async (s) => await eval(s),
-    args: [buildPageScript(code)]
-  });
-  const raw = result && result[0] ? result[0].result : null;
+// 把页面脚本回包分类成「执行了/没执行/抛错了」。
+///
+/// `buildPageScript` 的成功分支固定返回 `{ok:true,data}`；失败分支返回
+/// `{ok:false,error:{...},csp,executed}`。只有 `executed === true` 才说明用户代码
+/// 已经跑起来（副作用可能已发生），`csp` / 编译期 SyntaxError 都表示一行没执行。
+function classifyUserCodeResult(raw, started) {
+  const duration_ms = Math.max(0, Date.now() - started);
   if (raw && typeof raw === 'object' && 'ok' in raw) {
     if (raw.ok === false) {
-      return { ok: false, error: (raw.error && raw.error.message) || 'inject failed' };
+      const message = (raw.error && raw.error.message) || raw.error || 'inject failed';
+      // __abcEvalStarted 是页面内的探针：eval 真正开始执行后才置 true。
+      // 用户脚本自己抛带 "CSP" 字样的错误时 probe 已置位，不能按 csp 误判成没执行。
+      const executed = raw.executed === undefined ? raw.csp !== true : raw.executed === true;
+      return {
+        ok: false,
+        value: null,
+        error: message,
+        threw: executed ? message : null,
+        executed,
+        error_name: (raw.error && raw.error.name) || 'Error',
+        csp: raw.csp === true,
+        duration_ms
+      };
     }
-    return { ok: true, value: raw.data === undefined ? null : raw.data };
+    return {
+      ok: true,
+      value: raw.data === undefined ? null : raw.data,
+      error: null,
+      threw: null,
+      executed: true,
+      duration_ms
+    };
   }
-  return { ok: true, value: raw === undefined ? null : raw };
+  // executeScript 没抛错但也没有回包（frame 被移除 / 页面在注入瞬间导航）。
+  // buildPageScript 永远返回对象，所以裸 null 不可能是用户的成功返回值。
+  return {
+    ok: false,
+    value: null,
+    error: 'inject: executeScript 没有返回结果（frame 已移除或页面在注入时导航）',
+    threw: null,
+    executed: false,
+    error_name: 'InjectionError',
+    csp: false,
+    duration_ms
+  };
+}
+
+/// 在指定目标里执行用户代码，语义与 exec 一致（支持 return / 裸表达式 / await）。
+async function runUserCodeInTab(tabId, code, world, target) {
+  const started = Date.now();
+  let result;
+  try {
+    result = await chrome.scripting.executeScript({
+      target: target || { tabId },
+      // 小写 isolated 也必须进隔离世界；无法识别时按注入的历史默认 MAIN。
+      world: normalizeWorld(world) || 'MAIN',
+      func: async (s) => await eval(s),
+      args: [buildPageScript(code)]
+    });
+  } catch (e) {
+    // 注入本身失败（frame 被移除 / 无权限 / 页面已关闭）：脚本一行都没执行。
+    return {
+      ok: false,
+      value: null,
+      error: (e && e.message) || String(e),
+      threw: null,
+      executed: false,
+      error_name: 'InjectionError',
+      csp: false,
+      duration_ms: Math.max(0, Date.now() - started)
+    };
+  }
+  const raw = result && result[0] ? result[0].result : null;
+  return classifyUserCodeResult(raw, started);
+}
+
+// ---------------------------------------------------------------------------
+// 用户脚本模式（==UserScript== 元数据 + 最小 GM shim）
+// ---------------------------------------------------------------------------
+
+/// 解析油猴元数据块；没有识别到任何字段时返回 null（仍按普通脚本执行）。
+function parseUserscriptMetadata(code) {
+  const text = String(code || '');
+  const block = text.match(/\/\/\s*==UserScript==([\s\S]*?)\/\/\s*==\/UserScript==/);
+  if (!block) return null;
+  const meta = { name: null, namespace: null, version: null, matches: [], grant: [], runAt: null };
+  for (const line of block[1].split(/\r?\n/)) {
+    const match = line.match(/^\s*\/\/\s*@([A-Za-z][A-Za-z-]*)\s+(.+?)\s*$/);
+    if (!match) continue;
+    const key = match[1].toLowerCase();
+    const value = match[2];
+    if (key === 'match' || key === 'include') meta.matches.push(value);
+    else if (key === 'grant') meta.grant.push(value);
+    else if (key === 'run-at') meta.runAt = value;
+    else if (key === 'name') meta.name = value;
+    else if (key === 'namespace') meta.namespace = value;
+    else if (key === 'version') meta.version = value;
+  }
+  const recognised = !!(meta.name || meta.namespace || meta.version || meta.runAt
+    || meta.matches.length || meta.grant.length);
+  return recognised ? meta : null;
+}
+
+/// GM 存储命名空间：只保留 `[A-Za-z0-9._-]`，空了就回退默认值
+/// （localStorage key 里出现冒号/空白时，前缀匹配与清理都不可靠）。
+function sanitizeGmNamespace(raw) {
+  const text = String(raw === undefined || raw === null ? '' : raw).trim();
+  const safe = text.replace(/[^A-Za-z0-9._-]/g, '_');
+  return safe || 'atb-userscript';
+}
+
+/// 生成「GM shim + 用户脚本」的 IIFE。用户代码原样嵌进内层 async 函数，
+/// 因此 `return` / `await` 都可用；GM_* 是内层可见的词法变量（与油猴一致，
+/// 不挂到 window 上，避免被页面脚本误用/覆盖）。
+function buildUserscriptSource(code, meta, gmNamespace) {
+  const info = {
+    script: {
+      name: meta ? meta.name : null,
+      version: meta ? meta.version : null,
+      namespace: meta ? meta.namespace : null,
+      matches: meta ? meta.matches : [],
+      grant: meta ? meta.grant : [],
+      runAt: meta ? meta.runAt : null
+    },
+    scriptHandler: 'atb-userscript',
+    version: extensionVersion
+  };
+  const prefix = '__atb_gm__:' + sanitizeGmNamespace(gmNamespace) + ':';
+  return [
+    '(function () {',
+    "  'use strict';",
+    '  var __atbPrefix = ' + JSON.stringify(prefix) + ';',
+    '  var __atbMem = Object.create(null);',
+    '  var __atbInfo = ' + JSON.stringify(info) + ';',
+    '  var unsafeWindow = window;',
+    '  var GM_info = __atbInfo;',
+    '  function __atbGet(key, fallback) {',
+    '    var name = __atbPrefix + String(key);',
+    '    try {',
+    '      var raw = localStorage.getItem(name);',
+    '      if (raw === null || raw === undefined) {',
+    '        return Object.prototype.hasOwnProperty.call(__atbMem, String(key)) ? __atbMem[String(key)] : fallback;',
+    '      }',
+    '      return JSON.parse(raw);',
+    '    } catch (e) {',
+    '      return Object.prototype.hasOwnProperty.call(__atbMem, String(key)) ? __atbMem[String(key)] : fallback;',
+    '    }',
+    '  }',
+    '  function __atbSet(key, value) {',
+    '    var name = __atbPrefix + String(key);',
+    '    __atbMem[String(key)] = value;',
+    '    try { localStorage.setItem(name, JSON.stringify(value)); } catch (_) {}',
+    '  }',
+    '  function __atbDelete(key) {',
+    '    delete __atbMem[String(key)];',
+    '    try { localStorage.removeItem(__atbPrefix + String(key)); } catch (_) {}',
+    '  }',
+    '  function __atbList() {',
+    '    var out = [];',
+    '    var seen = Object.create(null);',
+    '    try {',
+    '      for (var i = 0; i < localStorage.length; i += 1) {',
+    '        var full = localStorage.key(i);',
+    '        if (full && full.indexOf(__atbPrefix) === 0) {',
+    '          var k = full.slice(__atbPrefix.length);',
+    '          if (!seen[k]) { seen[k] = true; out.push(k); }',
+    '        }',
+    '      }',
+    '    } catch (_) {}',
+    '    for (var m in __atbMem) { if (!seen[m]) { seen[m] = true; out.push(m); } }',
+    '    return out;',
+    '  }',
+    '  var GM_getValue = __atbGet;',
+    '  var GM_setValue = __atbSet;',
+    '  var GM_deleteValue = __atbDelete;',
+    '  var GM_listValues = __atbList;',
+    '  var GM_log = function () { try { console.log.apply(console, [\'[ATB GM]\'].concat(Array.prototype.slice.call(arguments))); } catch (_) {} };',
+    '  var GM_addStyle = function (css) {',
+    "    var style = document.createElement('style');",
+    '    style.textContent = String(css || \'\');',
+    '    (document.head || document.documentElement).appendChild(style);',
+    '    return style;',
+    '  };',
+    '  var __atbMenuSeq = 0;',
+    '  var GM_registerMenuCommand = function (name, fn) {',
+    '    var id = __atbMenuSeq += 1;',
+    '    window.__atbGmMenu = window.__atbGmMenu || [];',
+    '    window.__atbGmMenu.push({ id: id, name: String(name || \'\'), fn: typeof fn === \'function\' ? fn : null });',
+    '    try { console.log(\'[ATB GM] menu registered:\', name); } catch (_) {}',
+    '    return id;',
+    '  };',
+    '  var GM_xmlhttpRequest = function () {',
+    '    throw new Error(\'GM_xmlhttpRequest is not supported by atb userscript shim\');',
+    '  };',
+    '  return (async function () {',
+    code,
+    '  }).call(window);',
+    '})()'
+  ].join('\n');
+}
+
+/// 按注入选项准备最终代码：userscript=true 时解析元数据并包 GM shim。
+function prepareInjectCode(code, options) {
+  const opts = options || {};
+  if (opts.userscript !== true) {
+    return { code, meta: null, userscript: false };
+  }
+  const meta = parseUserscriptMetadata(code);
+  const namespace = sanitizeGmNamespace(
+    opts.gmNamespace || (meta && meta.namespace) || (meta && meta.name) || 'atb-userscript'
+  );
+  return {
+    code: buildUserscriptSource(code, meta, namespace),
+    meta,
+    userscript: true,
+    gmNamespace: namespace
+  };
+}
+
+// 注入前清理旧宿主。选择器错误只记 errors，不中断主脚本。
+async function runCleanupInTab(tabId, cleanupSelectors, cleanupCode, world, target) {
+  const selectors = Array.isArray(cleanupSelectors)
+    ? cleanupSelectors.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const result = { selectors: [], code_ok: null, errors: [] };
+  if (!selectors.length && !cleanupCode) return result;
+  if (selectors.length) {
+    try {
+      const rows = await chrome.scripting.executeScript({
+        target: target || { tabId },
+        world: normalizeWorld(world) || 'MAIN',
+        func: (list) => list.map((selector) => {
+          try {
+            const nodes = Array.from(document.querySelectorAll(selector));
+            nodes.forEach((node) => node.remove());
+            return { selector, removed: nodes.length };
+          } catch (e) {
+            return { selector, removed: 0, error: (e && e.message) || String(e) };
+          }
+        }),
+        args: [selectors]
+      });
+      // allFrames 时每个 frame 各回一份数组；逐个展开，统计仍然按选择器分组。
+      for (const frame of rows || []) {
+        for (const row of Array.isArray(frame && frame.result) ? frame.result : []) {
+          if (!row) continue;
+          if (row.error) result.errors.push(row.selector + ': ' + row.error);
+          const existing = result.selectors.find((item) => item.selector === row.selector);
+          if (existing) existing.removed += Number(row.removed) || 0;
+          else result.selectors.push({ selector: row.selector, removed: Number(row.removed) || 0 });
+        }
+      }
+    } catch (e) {
+      result.errors.push('cleanup selectors failed: ' + ((e && e.message) || String(e)));
+    }
+  }
+  if (cleanupCode) {
+    try {
+      const outcome = await runUserCodeInTab(tabId, String(cleanupCode), world, target || { tabId });
+      result.code_ok = outcome.ok === true;
+      if (!outcome.ok) result.errors.push('cleanup code: ' + (outcome.error || 'failed'));
+    } catch (e) {
+      result.code_ok = false;
+      result.errors.push('cleanup code: ' + ((e && e.message) || String(e)));
+    }
+  }
+  return result;
+}
+
+/// persist 的条目在重放时也要按原选项执行（userscript / cleanup）。
+async function applyPersistEntry(tabId, entry, target) {
+  const world = entry.world || 'MAIN';
+  const options = {
+    userscript: entry.userscript === true,
+    gmNamespace: entry.gmNamespace || null,
+    cleanupSelectors: entry.cleanupSelectors || [],
+    cleanupCode: entry.cleanupCode || null
+  };
+  const prepared = prepareInjectCode(entry.code, options);
+  const cleanup = await runCleanupInTab(
+    tabId,
+    options.cleanupSelectors,
+    options.cleanupCode,
+    world,
+    target || { tabId }
+  );
+  const outcome = await runUserCodeInTab(tabId, prepared.code, world, target || { tabId });
+  return { outcome, cleanup, userscript_meta: prepared.meta };
+}
+
+/// 持久注入条目是否已过期。
+/// `expiresAt` 缺失 = 旧条目（旧行为：永久）；`null` = 显式永久（--persist-forever）。
+function persistEntryExpiresAt(entry) {
+  const at = Number(entry && entry.expiresAt);
+  return Number.isFinite(at) && at > 0 ? at : null;
+}
+
+function isPersistEntryExpired(entry, now) {
+  const at = persistEntryExpiresAt(entry);
+  return at !== null && at <= (now === undefined ? Date.now() : now);
+}
+
+// 返回值摘要。页面侧（buildExecScript）已经把 DOM / Window / Function /
+/// Error 转成 `{__type:...}`；这里兜住「结构化克隆后残留的 Error/函数」并统一
+/// 计算 value_type。普通对象 / 数组 / 原始值原样返回。
+function describeValue(value) {
+  if (value === undefined || value === null) return value;
+  if (typeof value === 'function') return { __type: 'function', name: String(value.name || '') };
+  if (typeof value !== 'object') return value;
+  if (value.__type) return value;
+  try { if (value instanceof Error) return { __type: 'error', name: String(value.name || 'Error'), message: String(value.message || '').slice(0, 500) }; } catch (_) {}
+  try {
+    if (typeof Window !== 'undefined' && value instanceof Window) {
+      return { __type: 'window', url: String((value.location && value.location.href) || ''), title: String((value.document && value.document.title) || '') };
+    }
+  } catch (_) {}
+  if (value.nodeType === 1 && value.tagName) {
+    let rect = { x: 0, y: 0, width: 0, height: 0 };
+    try { const r = value.getBoundingClientRect(); rect = { x: r.x, y: r.y, width: r.width, height: r.height }; } catch (_) {}
+    return {
+      __type: 'element',
+      tag: String(value.tagName || '').toLowerCase(),
+      id: String(value.id || ''),
+      class: typeof value.className === 'string' ? value.className : String((value.getAttribute && value.getAttribute('class')) || ''),
+      rect,
+      text: String(value.innerText || value.textContent || '').trim().slice(0, 200)
+    };
+  }
+  if (value.nodeType === 3) return { __type: 'text', text: String(value.textContent || '').slice(0, 200) };
+  return value;
 }
 
 /// persistInjections 的读-改-写必须串行。
@@ -517,6 +830,23 @@ async function readPersistInjections() {
   return map && typeof map === 'object' ? map : {};
 }
 
+/// 过期条目清理：与 persist / remove 共用同一条 promise 链，避免
+/// 「读整份 map → 删除过期 → 写回」覆盖并发 persist 的新条目。
+async function pruneExpiredPersistInjections(now) {
+  return withPersistStoreLock(async () => {
+    const map = await readPersistInjections();
+    const removed = [];
+    for (const [name, entry] of Object.entries(map)) {
+      if (isPersistEntryExpired(entry, now === undefined ? Date.now() : now)) {
+        delete map[name];
+        removed.push(name);
+      }
+    }
+    if (removed.length) await chrome.storage.local.set({ persistInjections: map });
+    return { map, removed };
+  });
+}
+
 /// 脚本注入：一次性执行（run）或按名字持久化（persist/remove/list）。
 ///
 /// 持久化不是 registerContentScripts：MV3 只允许注册文件、不允许内联代码，
@@ -525,22 +855,65 @@ async function handleInject(msg) {
   const action = String(msg.action || 'run');
   // 大小写归一化后再落库，持久化条目里的 world 也必须是规范值。
   const world = normalizeWorld(msg.world) || 'MAIN';
+  const cleanupSelectors = Array.isArray(msg.cleanupSelectors)
+    ? msg.cleanupSelectors.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const cleanupCode = msg.cleanupCode ? String(msg.cleanupCode) : '';
+  const gmNamespace = msg.gmNamespace ? String(msg.gmNamespace) : null;
 
   if (action === 'list') {
-    // 只读：不进锁，避免被一次正在进行的写挡住。
-    const map = await readPersistInjections();
+    // 列出之前先清掉过期条目，并把旧条目（没有 expiresAt）迁移成
+    // 「现在 + defaultTtlSec」。整段必须进锁：list 自身会写回 storage。
+    const now = Date.now();
+    const defaultTtlSec = Number(msg.defaultTtlSec) > 0 ? Number(msg.defaultTtlSec) : 7200;
+    const snapshot = await withPersistStoreLock(async () => {
+      const map = await readPersistInjections();
+      let changed = false;
+      for (const [name, entry] of Object.entries(map)) {
+        if (isPersistEntryExpired(entry, now)) {
+          delete map[name];
+          changed = true;
+          continue;
+        }
+        // 只迁移「缺少 expiresAt」的旧条目；显式 null 是 --persist-forever，不能动。
+        if (entry && typeof entry === 'object' && entry.expiresAt === undefined) {
+          entry.expiresAt = now + defaultTtlSec * 1000;
+          entry.legacy = true;
+          changed = true;
+        }
+      }
+      if (changed) await chrome.storage.local.set({ persistInjections: map });
+      return map;
+    });
+    const items = Object.entries(snapshot).map(([name, rawEntry]) => {
+      const entry = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+      const expiresAt = persistEntryExpiresAt(entry);
+      const expiresInSec = expiresAt === null ? null : Math.max(0, Math.ceil((expiresAt - now) / 1000));
+      const item = {
+        name,
+        world: entry.world || 'MAIN',
+        matches: entry.matches || ['<all_urls>'],
+        code_length: String(entry.code || '').length,
+        code_preview: String(entry.code || '').slice(0, 120),
+        created_at: entry.createdAt || null,
+        expires_at: expiresAt,
+        expires_in_sec: expiresInSec,
+        expired: false
+      };
+      if (expiresInSec !== null && expiresInSec > 0) item.warning = 'long-lived injection';
+      if (entry.legacy === true) item.legacy = true;
+      if (entry.userscript === true) item.userscript = true;
+      return item;
+    });
+    const count = items.length;
+    if (count === 0) await ensurePersistBoot(false);
     return {
       ok: true,
       data: {
         action,
-        count: Object.keys(map).length,
-        items: Object.entries(map).map(([name, entry]) => ({
-          name,
-          world: entry.world || 'MAIN',
-          matches: entry.matches || ['<all_urls>'],
-          code_length: String(entry.code || '').length,
-          code_preview: String(entry.code || '').slice(0, 120)
-        }))
+        count,
+        items,
+        warnings: [`${count} 个持久注入会在每次导航后重放；--persist 默认 2 小时过期`]
       }
     };
   }
@@ -550,13 +923,16 @@ async function handleInject(msg) {
     if (!name) return { ok: false, error: 'name is required' };
     const saved = await withPersistStoreLock(async () => {
       const map = await readPersistInjections();
+      for (const [key, item] of Object.entries(map)) {
+        if (isPersistEntryExpired(item)) delete map[key];
+      }
       const existed = !!map[name];
       delete map[name];
       await chrome.storage.local.set({ persistInjections: map });
       return { existed, count: Object.keys(map).length };
     });
     if (saved.count === 0) await ensurePersistBoot(false);
-    return { ok: true, data: { action, name, removed: saved.existed, count: saved.count } };
+    return { ok: true, data: { action, name, removed: saved.existed, count: saved.count, total_persist_count: saved.count } };
   }
 
   if (action === 'persist') {
@@ -572,26 +948,105 @@ async function handleInject(msg) {
     if (!matches) {
       return { ok: false, error: 'matches 必须是非空字符串数组（传 null 才表示 <all_urls>）' };
     }
-    // 读-改-写整段进锁；下面的 runUserCodeInTab 留在锁外，避免一条慢注入堵住其它 persist。
+    // TTL 口径。
+    // - 旧 daemon 三个字段都没传 → 保持旧行为「永久」，升级扩展不能让旧 CLI 的注入突然失效；
+    // - 新 daemon 显式给 --ttl → ttlSec=N 优先；
+    // - 没给 --ttl 但给了 defaultTtlSec → 优先用户在本扩展设置页选的 persistTtlSec，
+    //   没有设置再用 daemon 的默认值；
+    // - persistForever=true → 永久。
+    const hasTtlProtocol =
+      msg.persistForever !== undefined ||
+      msg.ttlSec !== undefined ||
+      msg.defaultTtlSec !== undefined;
+    let ttlSec = null;
+    if (msg.persistForever === true) {
+      ttlSec = null;
+    } else if (hasTtlProtocol) {
+      const explicit = Number(msg.ttlSec);
+      if (Number.isFinite(explicit) && explicit > 0) {
+        ttlSec = Math.max(1, Math.floor(explicit));
+      } else {
+        const fallbackRaw = Number(msg.defaultTtlSec);
+        const fallback =
+          Number.isFinite(fallbackRaw) && fallbackRaw > 0 ? Math.floor(fallbackRaw) : 7200;
+        let stored = fallback;
+        try {
+          const settings = await chrome.storage.local.get({ persistTtlSec: fallback });
+          const value = Number(settings.persistTtlSec);
+          if (Number.isFinite(value) && value > 0) stored = Math.floor(value);
+        } catch (_) {}
+        ttlSec = stored;
+      }
+    }
+    const createdAt = Date.now();
+    const expiresAt = ttlSec === null ? null : createdAt + ttlSec * 1000;
+    const userscript = msg.userscript === true;
+    const prepared = prepareInjectCode(code, { userscript, gmNamespace });
+    const entry = {
+      code,
+      world,
+      matches,
+      createdAt,
+      expiresAt,
+      userscript,
+      gmNamespace: userscript ? (gmNamespace || prepared.gmNamespace || null) : null,
+      cleanupSelectors,
+      cleanupCode: cleanupCode || null
+    };
+    // 读-改-写整段进锁；下面的实际注入留在锁外，避免一条慢注入堵住其它 persist。
+    // 顺手清掉过期条目，避免 total_persist_count 把死条目算进去。
     const saved = await withPersistStoreLock(async () => {
       const map = await readPersistInjections();
-      map[name] = { code, world, matches, createdAt: Date.now() };
+      for (const [key, item] of Object.entries(map)) {
+        if (isPersistEntryExpired(item, createdAt)) delete map[key];
+      }
+      map[name] = entry;
       await chrome.storage.local.set({ persistInjections: map });
       return { count: Object.keys(map).length };
     });
     await ensurePersistBoot(true);
+    const cleanup = { selectors: [], code_ok: null, errors: [] };
+    const apply = { executed: false, threw: null };
     let applied = false;
     try {
       const tabId = Number(msg.tabId);
       if (Number.isInteger(tabId) && tabId > 0) {
-        const outcome = await runUserCodeInTab(tabId, code, world, buildScriptTarget(tabId, msg));
-        applied = outcome.ok;
-        if (!outcome.ok) console.log('[TMWD] persist apply failed:', outcome.error);
+        const result = await applyPersistEntry(tabId, entry, buildScriptTarget(tabId, msg));
+        Object.assign(cleanup, result.cleanup);
+        applied = result.outcome.ok === true;
+        apply.executed = result.outcome.executed === true;
+        apply.threw = result.outcome.threw || null;
+        if (!result.outcome.ok) console.log('[TMWD] persist apply failed:', result.outcome.error);
       }
     } catch (e) {
       console.log('[TMWD] persist apply failed:', e.message);
     }
-    return { ok: true, data: { action, name, world, matches, applied, count: saved.count } };
+    const expiresInSec = expiresAt === null ? null : Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+    const data = {
+      action,
+      name,
+      world,
+      matches,
+      applied,
+      count: saved.count,
+      total_persist_count: saved.count,
+      expires_at: expiresAt,
+      expires_in_sec: expiresInSec,
+      persist_forever: expiresAt === null,
+      warning: expiresAt === null
+        ? '持久注入永久驻留：每次导航后重放，会与页面/其它用户脚本长期共存；用 --remove 清理'
+        : `持久注入会在每次导航后重放，并在 ${expiresInSec} 秒后过期`,
+      apply,
+      cleanup
+    };
+    if (userscript) {
+      data.userscript_meta = prepared.meta;
+      if (!prepared.meta) {
+        data.userscript_warning = '未找到 ==UserScript== 元数据';
+        data.warning += '；未找到 ==UserScript== 元数据';
+      }
+    }
+    return { ok: true, data };
   }
 
   // run：一次性执行
@@ -600,25 +1055,174 @@ async function handleInject(msg) {
   const code = String(msg.code || '');
   if (!code) return { ok: false, error: 'code is required' };
   const started = Date.now();
+  const target = buildScriptTarget(tabId, msg);
+  const userscript = msg.userscript === true;
+  const prepared = prepareInjectCode(code, { userscript, gmNamespace });
+  let cleanup;
+  let outcome;
   try {
-    const outcome = await runUserCodeInTab(tabId, code, world, buildScriptTarget(tabId, msg));
-    if (!outcome.ok) return { ok: false, error: outcome.error };
+    cleanup = await runCleanupInTab(tabId, cleanupSelectors, cleanupCode, world, target);
+    outcome = await runUserCodeInTab(tabId, prepared.code, world, target);
+  } catch (e) {
+    const message = (e && e.message) || String(e);
+    const cleanupResult = cleanup || { selectors: [], code_ok: null, errors: [] };
     return {
-      ok: true,
+      ok: false,
+      error_code: 'inject_failed',
+      error: message,
+      action: 'run',
+      world,
+      executed: false,
+      returned: null,
+      threw: null,
+      value: null,
+      duration_ms: Date.now() - started,
+      cleanup: cleanupResult,
       data: {
+        ok: false,
         action: 'run',
         world,
-        value: outcome.value,
-        elapsed_ms: Date.now() - started
+        executed: false,
+        returned: null,
+        threw: null,
+        value: null,
+        error_code: 'inject_failed',
+        error: message,
+        duration_ms: Date.now() - started,
+        cleanup: cleanupResult
       }
     };
-  } catch (e) {
-    return { ok: false, error: e.message };
   }
+  const base = {
+    action: 'run',
+    world,
+    duration_ms: Math.max(0, Date.now() - started),
+    cleanup
+  };
+  if (userscript) {
+    base.userscript_meta = prepared.meta;
+    if (!prepared.meta) base.warning = '未找到 ==UserScript== 元数据';
+  }
+  if (!outcome.ok) {
+    // executed=true 表示脚本已经开始执行后抛错（副作用可能已发生）；
+    // false 表示注入/编译阶段失败，一行都没执行。
+    const codeName = outcome.executed ? 'inject_script_threw' : 'inject_failed';
+    const threw = outcome.executed ? (outcome.threw || outcome.error) : null;
+    const data = Object.assign({}, base, {
+      ok: false,
+      executed: outcome.executed === true,
+      returned: null,
+      threw,
+      value: null,
+      error_code: codeName,
+      error: outcome.error
+    });
+    // 顶层同样展开一份：daemon 走 data，popup / 其它直接调用方读顶层。
+    return Object.assign({ ok: false, error_code: codeName, error: outcome.error, data }, data);
+  }
+  const value = describeValue(outcome.value);
+  const data = Object.assign({}, base, {
+    executed: true,
+    returned: value,
+    threw: null,
+    value,
+    value_type: typeof value
+  });
+  if (value === null) {
+    data.note = '脚本执行完成，返回值为 null；如果脚本有重入 guard，可能提前 return';
+  }
+  return { ok: true, data };
 }
 
 const PERSIST_BOOT_ID = 'abc-persist-boot';
 let persistBootReady = false;
+
+// 把目标标签切到前台（可选同时聚焦窗口）。
+/// `chrome.tabs.update({active:true})` 只切换窗口内 active tab；窗口最小化时
+/// visibilityState 仍是 hidden，所以需要 `windows.update({focused:true})`。
+async function handleFocusTab(msg) {
+  const tabId = Number(msg.tabId);
+  if (!Number.isInteger(tabId) || tabId <= 0) return { ok: false, error: 'tabId is required' };
+  try {
+    const tab = await chrome.tabs.update(tabId, { active: true });
+    if (!tab) return { ok: false, error: 'tab not found: ' + tabId };
+    const focusWindow = msg.focusWindow !== false && msg.focus_window !== false;
+    let windowStarted = false;
+    let windowError = null;
+    if (focusWindow && tab.windowId) {
+      try {
+        // 最小化窗口只设 focused 在部分平台不会恢复窗口；先恢复 normal 再聚焦。
+        const win = await chrome.windows.get(tab.windowId);
+        if (win && win.state === 'minimized') {
+          await chrome.windows.update(tab.windowId, { state: 'normal' });
+        }
+        await chrome.windows.update(tab.windowId, { focused: true });
+        windowStarted = true;
+      } catch (e) {
+        windowError = (e && e.message) || String(e);
+      }
+    }
+    return {
+      ok: true,
+      data: {
+        active: true,
+        tab_id: tab.id,
+        url: tab.url || null,
+        title: tab.title || null,
+        window_id: tab.windowId || null,
+        window_focused: windowStarted,
+        window_error: windowError
+      }
+    };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+// 列出已安装扩展。`management` 是 optional_permissions —— 用户没在设置页
+/// 点授权时 `chrome.management` 不存在，必须给出可执行的 hint，而不是只报一句
+/// "undefined is not a function"。
+async function handleListExtensions(msg) {
+  if (!chrome.management || typeof chrome.management.getAll !== 'function') {
+    return {
+      ok: false,
+      error_code: 'permission_required',
+      error: '扩展未获得 management 权限，无法列出已安装扩展',
+      hint: '在扩展设置页点击「授权读取扩展列表」'
+    };
+  }
+  try {
+    const includeDisabled = msg.includeDisabled === true || msg.include_disabled === true;
+    const all = await chrome.management.getAll();
+    const items = (all || [])
+      .filter((item) => item && (includeDisabled || item.enabled))
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        version: item.version,
+        enabled: item.enabled === true,
+        type: item.type || null,
+        install_type: item.installType || null,
+        homepage_url: item.homepageUrl || null,
+        description: item.description || ''
+      }));
+    return {
+      ok: true,
+      data: { permission_granted: true, count: items.length, items }
+    };
+  } catch (e) {
+    const message = (e && e.message) || String(e);
+    if (/permission|not available|undefined/i.test(message)) {
+      return {
+        ok: false,
+        error_code: 'permission_required',
+        error: '扩展未获得 management 权限：' + message,
+        hint: '在扩展设置页点击「授权读取扩展列表」'
+      };
+    }
+    return { ok: false, error: message };
+  }
+}
 
 /// 让 persist_boot.js 在 document_start 运行，这样持久注入能更早落到页面里。
 /// 注册失败（旧版 Chrome / 权限受限）时退回 webNavigation.onCommitted 重放。
@@ -655,8 +1259,16 @@ async function ensurePersistBoot(enable) {
 }
 
 async function syncPersistBoot() {
-  const store = await chrome.storage.local.get({ persistInjections: {} });
-  const count = Object.keys(store.persistInjections || {}).length;
+  // 冷启动时顺带清过期条目：否则「只留一堆过期注入」也会让我们注册
+  // persist_boot.js，每次导航都白跑一次 storage 读取。
+  let count = 0;
+  try {
+    const { map } = await pruneExpiredPersistInjections();
+    count = Object.keys(map).length;
+  } catch (e) {
+    const store = await chrome.storage.local.get({ persistInjections: {} });
+    count = Object.keys(store.persistInjections || {}).length;
+  }
   await ensurePersistBoot(count > 0);
 }
 
@@ -752,15 +1364,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true, applied, deduped: true });
       return;
     }
-    for (const entry of message.entries || []) {
+    // 重放前先清过期条目；boot 传来的 entry 可能已经过期（document_start
+    // 到 SW 收到消息之间隔了一次导航），以 storage 里的最新条目为准。
+    let live = null;
+    try {
+      const pruned = await pruneExpiredPersistInjections();
+      live = pruned.map;
+    } catch (e) {
+      console.warn('[TMWD] 持久注入过期清理失败，本次按消息内容重放:', e && e.message);
+    }
+    for (const requested of message.entries || []) {
+      const entry = live ? live[requested.name] : requested;
+      // 已删除/已过期不是「投递失败」：标 ok:true + skipped，避免 persist_boot
+      // 的失败重试和 content.js 的 pending 补发反复追一条死配置。
+      if (!entry) {
+        applied.push({ name: requested.name, ok: true, skipped: true, error: 'removed' });
+        continue;
+      }
+      if (isPersistEntryExpired(entry)) {
+        applied.push({ name: requested.name, ok: true, skipped: true, expired: true, error: 'expired' });
+        continue;
+      }
       try {
-        const outcome = await runUserCodeInTab(tabId, entry.code, entry.world || 'MAIN', { tabId });
-        applied.push({ name: entry.name, ok: outcome.ok, error: outcome.error || null });
+        const result = await applyPersistEntry(tabId, entry, { tabId });
+        // 执行后抛错也算「已送达」：再重试只会重复副作用，persist_boot 不该重发。
+        const delivered = result.outcome.ok === true || result.outcome.executed === true;
+        applied.push({
+          name: requested.name,
+          ok: delivered,
+          executed: result.outcome.executed === true,
+          threw: result.outcome.threw || null,
+          error: result.outcome.error || null
+        });
       } catch (e) {
-        applied.push({ name: entry.name, ok: false, error: e.message });
+        applied.push({ name: requested.name, ok: false, error: (e && e.message) || String(e) });
       }
     }
     sendResponse({ ok: true, applied });
+  });
+  return true;
+});
+
+/// persist_boot.js 发现过期条目时发来的「请清理」消息。
+/// 内容脚本不能安全地直接写整份 map（会覆盖并发的 persist），必须交给 SW 的锁。
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== 'persist-prune-expired') return false;
+  if (sender && sender.id && sender.id !== chrome.runtime?.id) return false;
+  bgTask('persistPrune', async () => {
+    try {
+      const { removed } = await pruneExpiredPersistInjections();
+      sendResponse({ ok: true, removed: removed.length, names: removed });
+    } catch (e) {
+      sendResponse({ ok: false, error: (e && e.message) || String(e) });
+    }
   });
   return true;
 });
@@ -1017,6 +1673,13 @@ async function handleExtMessage(msg, sender) {
   if (msg.cmd === 'inject') {
     return await handleInject(msg);
   }
+  // 新增命令只加不改。旧 daemon 不认识它们 → 永远走不到这里。
+  if (msg.cmd === 'focusTab') {
+    return await handleFocusTab(msg, sender);
+  }
+  if (msg.cmd === 'listExtensions') {
+    return await handleListExtensions(msg, sender);
+  }
   if (msg.cmd === 'frames') {
     return await handleFrames(msg, sender);
   }
@@ -1078,6 +1741,8 @@ async function handleStatus() {
       profileLabel,
       extensionId: chrome.runtime?.id,
       extensionVersion,
+      // 只报「有没有拿到 management 权限」，不触发任何授权弹窗。
+      management_permission: !!chrome.management,
       fileSchemeAccess: await isAllowedFileSchemeAccess(),
       // 心跳可观测性：最近一次 ping / pong 的时间与 RTT，排障时不用猜链路状态。
       heartbeat: {
@@ -1128,7 +1793,7 @@ async function handleReconnect() {
   return { ok: true, data: { requested: true, wsUrl: getWsUrl(), wsPort } };
 }
 
-/// 信任档位（方案 C）：默认 compat 不改任何既有行为；strict 由用户显式开启。
+// 信任档位：默认 compat 不改任何既有行为；strict 由用户显式开启。
 async function handleSetWsTrustMode(msg) {
   const mode = String(msg.mode || '').trim().toLowerCase();
   if (!WS_TRUST_MODES.has(mode)) {
@@ -1593,8 +2258,8 @@ function ensureDebugAttached(session) {
   return withDebugTabLock(session.tabId, () => ensureDebugAttachedLocked(session));
 }
 
-/// 单个 tab 的 detach 本体：**调用方必须已持有 tab 锁**。
-/// 返回值 true = 需要调用方在**锁外**落盘（见下方 注释）。
+// 单个 tab 的 detach 本体：**调用方必须已持有 tab 锁**。
+// 返回值 true = 需要调用方在**锁外**落盘。
 async function detachDebugSessionLocked(session, reason = 'manual') {
   if (!session) return false;
   await chrome.alarms.clear(debugDetachAlarmName(session.tabId)).catch(() => null);
@@ -1993,7 +2658,7 @@ async function runDebugRestoreOnBoot() {
 /// 恢复本体：**调用方必须已持有状态锁**（经 ensureDebugSessionsRestored 进入）。
 /// 对仍 attached 的 tab 重建 session，并重新打开 Fetch / Network / Runtime。
 /// 任何一步失败都只 warn，绝不能让 SW 启动路径 reject。
-/// 返回值 `{ pending }`：仍保留、等下一次恢复的条目数（用它决定要不要落「本轮已恢复」标记）。
+// 返回值 `{ pending }`：仍保留、等下一次恢复的条目数。
 async function restoreDebugSessionsLocked() {
   const area = debugInterceptStoreArea();
   if (!area) return { pending: 0 };
@@ -3546,11 +4211,11 @@ async function decodeDataUrlBitmap(dataUrl) {
 /// 按 y 偏移把各片贴到同一张 OffscreenCanvas 上，再编码回 data URL。
 ///
 /// 两处硬约束：
-///   * 画布宽度与**纵向比例**都必须以第一片的真实像素为准。captureVisibleTab 的输出
+// *：画布宽度与**纵向比例**都必须以第一片的真实像素为准。captureVisibleTab 的输出
 ///     与 innerW/innerH 之间可能因为 dpr 取整、页面缩放（浏览器 zoom）差几个像素，
 ///     用 `y * dpr` 会把每片按错误步长叠上去，整页系统性错位且完全不报错。
 ///     这里用 `realScale = bmp.height / innerH` 反推真实比例，后续每片都校验高度一致。
-///   * 画布面积必须有上限，超了抛结构化错误，绝不让 SW 被 OOM 干掉。
+// *：画布面积必须有上限，超了抛结构化错误，绝不让 SW 被 OOM 干掉。
 ///
 /// `offsets[i]` 的 offset 是 **CSS 像素**的滚动 y（不是设备像素）。
 async function stitchFullPageSlices(offsets, format, quality, { innerH, coveredCssH, maxHeightPx, maxPixels }) {
@@ -4093,16 +4758,41 @@ function buildExecScript(code, errorHandler) {
     // 序列化失败必须能传到外层（见下面的 return），不能伪装成正常的字符串结果。
     // 用 Symbol 当哨兵，避免与用户真实返回的 {message:...} 对象混淆。
     const __abcSerializeError = Symbol('abcSerializeError');
+    // DOM 节点 / Window / Function / Error 不是 JSON 安全的返回值。
+    // 以前依赖 JSON.stringify 的隐式行为（元素变 outerHTML、函数直接炸掉），
+    // 智能体拿不到 tag/id/class/rect。这里统一换成带 __type 的结构化摘要。
+    function __abcDescribe(value) {
+      if (value === null || value === undefined) return value;
+      if (typeof value === 'function') return { __type: 'function', name: String(value.name || '') };
+      if (typeof value !== 'object') return value;
+      try { if (value instanceof Error) return { __type: 'error', name: String(value.name || 'Error'), message: String(value.message || '').slice(0, 500) }; } catch (_) {}
+      try { if (value.window === value && value.document) return { __type: 'window', url: String((value.location && value.location.href) || ''), title: String((value.document && value.document.title) || '') }; } catch (_) {}
+      if (value.nodeType === 1) {
+        let rect = { x: 0, y: 0, width: 0, height: 0 };
+        try { const r = value.getBoundingClientRect(); rect = { x: r.x, y: r.y, width: r.width, height: r.height }; } catch (_) {}
+        return {
+          __type: 'element',
+          tag: String(value.tagName || '').toLowerCase(),
+          id: String(value.id || ''),
+          class: typeof value.className === 'string' ? value.className : String((value.getAttribute && value.getAttribute('class')) || ''),
+          rect,
+          text: String(value.innerText || value.textContent || '').trim().slice(0, 200)
+        };
+      }
+      if (value.nodeType === 3) return { __type: 'text', text: String(value.textContent || '').slice(0, 200) };
+      return value;
+    }
     function smartProcessResult(result) {
-      if (result === null || result === undefined || typeof result !== 'object') return result;
-      try { if (result.window === result && result.document) return '[Window: ' + (result.location?.href || 'about:blank') + ']'; } catch(_){}
+      if (result === null || result === undefined) return result;
+      if (typeof result !== 'object') return __abcDescribe(result);
+      try { if (result.window === result && result.document) return __abcDescribe(result); } catch(_){}
       if (typeof jQuery !== 'undefined' && result instanceof jQuery) {
         const elements = []; for (let i = 0; i < result.length; i++) { if (result[i] && result[i].nodeType === 1) elements.push(result[i].outerHTML); } return elements;
       }
       if (result instanceof NodeList || result instanceof HTMLCollection) {
         const elements = []; for (let i = 0; i < result.length; i++) { if (result[i] && result[i].nodeType === 1) elements.push(result[i].outerHTML); } return elements;
       }
-      if (result.nodeType === 1) return result.outerHTML;
+      if (result.nodeType === 1 || result.nodeType === 3 || result instanceof Error) return __abcDescribe(result);
       if (!Array.isArray(result) && typeof result === 'object' && 'length' in result && typeof result.length === 'number') {
         const firstElement = result[0];
         if (firstElement && firstElement.nodeType === 1) {
@@ -4110,8 +4800,11 @@ function buildExecScript(code, errorHandler) {
           for (let i = 0; i < length; i++) { const elem = result[i]; if (elem && elem.nodeType === 1) elements.push(elem.outerHTML); } return elements;
         }
       }
-      try { return JSON.parse(JSON.stringify(result, function(key, value) { if (typeof value === 'object' && value !== null) { if (value.nodeType === 1) return value.outerHTML; if (value === window || value === document) return '[Object]'; try { if (value.window === value && value.document) return '[Window]'; } catch(_){} } return value; })); } catch (e) { return { [__abcSerializeError]: true, message: String((e && e.message) || e) }; }
+      try { return JSON.parse(JSON.stringify(result, function(key, value) { if (typeof value === 'object' && value !== null) { if (value.nodeType === 1 || value.nodeType === 3 || value instanceof Error) return __abcDescribe(value); if (value === window || value === document) return '[Object]'; try { if (value.window === value && value.document) return __abcDescribe(value); } catch(_){} } return value; })); } catch (e) { return { [__abcSerializeError]: true, message: String((e && e.message) || e) }; }
     }
+    // executed 必须在 catch 里可读 —— 决定「脚本抛错」还是「注入本身失败」。
+    // 以前声明在 try 块内，catch 看不到。
+    let __abcEvalStarted = false;
     try {
       const jsCode = ${JSON.stringify(code)}.trim();
       const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
@@ -4124,7 +4817,6 @@ function buildExecScript(code, errorHandler) {
       // 只有「编译期失败」才允许换通道。用探针区分：eval 的代码先执行
       // __abcEvalStarted = true，用户脚本自己 throw new SyntaxError('await ...')
       // 时探针已置位，必须原样上抛，绝不能再跑一次（副作用会翻倍）。
-      let __abcEvalStarted = false;
       try {
         r = eval('__abcEvalStarted = true;\\n' + jsCode);
         if (r instanceof Promise) r = await r;
@@ -4148,6 +4840,8 @@ function buildExecScript(code, errorHandler) {
             if (fallbackBody === primaryBody) throw compileError;
             runner = new AsyncFunction(fallbackBody);
           }
+          // 编译成功才置位：执行期异常属于「脚本已执行」，SyntaxError 属于「没执行」。
+          __abcEvalStarted = true;
           r = await runner();
         } else {
           throw e;
@@ -4170,13 +4864,17 @@ function buildPageScript(code) {
   return buildExecScript(code, `
       const errMsg = e.message || String(e);
       return { ok: false, error: { name: e.name || 'Error', message: errMsg, stack: e.stack || '' },
-        csp: errMsg.includes('Refused to evaluate') || errMsg.includes('unsafe-eval') || errMsg.includes('Content Security Policy') };
+        csp: errMsg.includes('Refused to evaluate') || errMsg.includes('unsafe-eval') || errMsg.includes('Content Security Policy'),
+        // true = 用户脚本已经开始执行后抛错（副作用可能已发生）；
+        // false = 编译期 SyntaxError / CSP 拦截，一行都没执行。
+        executed: __abcEvalStarted === true };
   `);
 }
 
 function buildCdpScript(code) {
   return buildExecScript(code, `
-      return { ok: false, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' } };
+      return { ok: false, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' },
+        executed: __abcEvalStarted === true };
   `);
 }
 
@@ -4667,7 +5365,7 @@ const WS_KEEPALIVE_STALE_MS = Math.round(ALARM_MIN_MINUTES * 60 * 1000 * 2.5);
 /// 最近一次收到**入站消息**的时刻。daemon 对应用层 ping 会回 pong（src/server/ws.rs
 /// 的 is_app_ping 分支），所以空闲链路也能靠 pong 刷新；其它 result / 通知同样算活。
 let lastPongAt = 0;
-/// 最近一次**发出** ping 的时刻，与 lastPongAt 配对算 RTT（
+// 最近一次**发出** ping 的时刻，与 lastPongAt 配对算 RTT（：
 /// 旧实现只 ping 不跟踪 pong，静默判定实际退化成「有没有业务消息」）。
 let lastPingAt = 0;
 /// 最近一次 ping→pong 的往返毫秒数（单次采样，够排障用；不做滑窗统计）。
@@ -4787,7 +5485,7 @@ chrome.alarms?.onAlarm?.addListener?.((alarm) => {
 async function handleAlarm(alarm) {
   if (!alarm || !alarm.name) return;
   if (alarm.name === 'tmwd-self-reload') {
-    // 兼容旧版本残留的 alarm（management.reload 处理器已随 删除）。
+    // 兼容旧版本残留的 alarm。
     // 显式 reload 同样不能截断在途命令，交给 reloadWhenIdle 等空闲。
     reloadWhenIdle('self-reload');
     return;
@@ -5030,7 +5728,7 @@ function wsCommandReleaseIfRunning(id) {
 // Runtime.evaluate 立刻失败），不必等到 daemon 侧超时后干等。
 const wsRunningExecs = new Map();
 
-// （方案 C）：strict 档位下「无 token 连接」只放行只读命令。
+// （报告方案 C）：strict 档位下「无 token 连接」只放行只读命令。
 // `cancel` 不在其中：它会让 debugger attach 提前释放（可被用来打断别人正在跑的诊断），
 // strict 档位下必须和 exec 同等信任级别。
 const WS_READONLY_COMMANDS = new Set([
@@ -5071,6 +5769,7 @@ async function handleWsExec(data, socket = ws) {
   const hasFrameTarget = !!(data.frameId !== undefined || data.frame_id !== undefined || data.allFrames === true || data.all_frames === true);
   const needsDialogGuard = /\b(alert|confirm|prompt)\s*\(/.test(codeText);
   const mayOpenTab = /window\.open\s*\(|target\s*=\s*["']?_blank|\.click\s*\(/.test(codeText);
+  const execStarted = Date.now();
   // Use onCreated listener to reliably capture new tabs (avoids race condition with query-diff)
   const newTabIds = new Set();
   const onCreated = (tab) => { newTabIds.add(tab.id); };
@@ -5091,15 +5790,17 @@ async function handleWsExec(data, socket = ws) {
       if (res === null || res === undefined) {
         console.log('[TMWD-WS] executeScript returned null/undefined, treating as CSP issue');
         injectError = await describeInjectFailure(tabId);
-        res = { ok: false, error: { name: 'Error', message: injectError, stack: '' }, csp: true };
+        res = { ok: false, error: { name: 'Error', message: injectError, stack: '' }, csp: true, executed: false };
       }
     } catch (e) {
       console.log('[TMWD-WS] scripting.executeScript failed:', e.message);
       injectError = e.message || String(e);
-      res = { ok: false, error: { name: e.name || 'Error', message: injectError, stack: e.stack || '' }, csp: true };
+      res = { ok: false, error: { name: e.name || 'Error', message: injectError, stack: e.stack || '' }, csp: true, executed: false };
     }
-    // CDP fallback for CSP-restricted pages
-    if (res && !res.ok && res.csp && !hasFrameTarget) {
+    // CDP fallback for CSP-restricted pages.
+    // executed=true 说明脚本已经在页面里跑过（用户自己抛了带 CSP 字样的错误），
+    // 再走 CDP 会二次执行有副作用的脚本，必须排除。
+    if (res && !res.ok && res.csp && res.executed !== true && !hasFrameTarget) {
       console.log('[TMWD-WS] CDP fallback for tab', tabId);
       const wrappedCode = buildCdpScript(codeText);
       try {
@@ -5113,7 +5814,8 @@ async function handleWsExec(data, socket = ws) {
         scheduleDebugDetach(session, 'ws-exec-idle');
         if (cdpRes.exceptionDetails) {
           const desc = cdpRes.exceptionDetails.exception?.description || 'CDP Error';
-          res = { ok: false, error: { name: 'Error', message: desc, stack: desc } };
+          // CDP 表达式已编译并执行，exceptionDetails 代表脚本抛错。
+          res = { ok: false, error: { name: 'Error', message: desc, stack: desc }, executed: true };
         } else {
           res = cdpRes.result.value;
         }
@@ -5124,7 +5826,7 @@ async function handleWsExec(data, socket = ws) {
         // 实际根因往往在 executeScript 那一步。
         const parts = ['CDP fallback failed: ' + cdpErr.message];
         if (injectError) parts.push('inject failed: ' + injectError);
-        res = { ok: false, error: { name: 'Error', message: parts.join(' | '), stack: '' } };
+        res = { ok: false, error: { name: 'Error', message: parts.join(' | '), stack: '' }, executed: false };
       }
     }
     // 只有脚本里出现"可能新建标签页"的动作时才等待，避免每条命令白付 200ms。
@@ -5136,10 +5838,33 @@ async function handleWsExec(data, socket = ws) {
       try { const t = await chrome.tabs.get(id); newTabs.push({id: t.id, url: t.url, title: t.title}); } catch (_) {}
     }
     if (res?.ok) {
-      sendWsCommandResponse(socket, data.id, { type: 'result', id: data.id, result: res.data ?? null, newTabs });
+      const resultValue = describeValue(res.data ?? null);
+      // 只新增字段，`result` 本身仍是用户脚本的返回值。
+      sendWsCommandResponse(socket, data.id, {
+        type: 'result',
+        id: data.id,
+        result: resultValue,
+        newTabs,
+        executed: true,
+        threw: null,
+        value_type: typeof resultValue,
+        duration_ms: Math.max(0, Date.now() - execStarted)
+      });
     } else {
       console.log(res);
-      sendWsCommandResponse(socket, data.id, { type: 'error', id: data.id, error: res?.error || 'Unknown error', newTabs });
+      // 失败同样带上 executed/threw：调用方据此区分「脚本已执行后抛错」与
+      // 「注入/编译失败、一行都没跑」。旧 daemon 忽略这些顶层字段。
+      const classified = classifyUserCodeResult(res, execStarted);
+      sendWsCommandResponse(socket, data.id, {
+        type: 'error',
+        id: data.id,
+        error: res?.error || 'Unknown error',
+        newTabs,
+        executed: classified.executed === true,
+        threw: classified.threw,
+        value_type: 'undefined',
+        duration_ms: classified.duration_ms
+      });
     }
   } catch (e) {
     sendWsCommandResponse(socket, data.id, { type: 'error', id: data.id, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' } });
@@ -5150,7 +5875,7 @@ async function handleWsExec(data, socket = ws) {
   }
 }
 
-/// daemon 在 exec 超时/取消时下发 `{ id: "<exec_id>#cancel", cmd: "cancel", execId, tabId, reason }`。
+// daemon 在 exec 超时/取消时下发 `{ id: "<exec_id>#cancel", cmd: "cancel", execId, tabId, reason }`。
 /// 语义是「把这条 exec 为它建立的 debugger attach 提前释放」，让挂着的 Runtime.evaluate
 /// 立刻失败，而不是等 daemon 侧的 HTTP 超时结束。
 ///   - 有采集/拦截用途（network/console/Fetch）的 tab **不能**拆：返回 cancelled:false + reason:'in_use'，
@@ -5185,12 +5910,12 @@ async function handleCancelCommand(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// 握手前的对端鉴权（契约 §3.1）
+// 握手前的对端鉴权
 //
 // daemon 在 upgrade 成功后立刻下发 {"type":"ws_hello",v,nonce,proof,auth_required}，
 // proof = HMAC-SHA256(key=wsToken, msg=nonce + "|" + extension_id) 的小写 hex。
 // 扩展只有在算出同一 proof 之后才发 ext_ready —— 否则「谁绑上了端口谁就是 daemon」，
-// 本机任意进程都能拿全量标签并下发 exec（完整攻击链）。
+// 本机任意进程都能拿全量标签并下发 exec。
 //
 // wsToken 为空时保持历史行为：onopen 立即发 ext_ready，ws_hello 直接忽略（老 daemon
 // 不发这一帧，也不能因此把兼容链路卡死）。
@@ -5346,7 +6071,7 @@ async function sendExtReady(socket) {
   scheduleTabsUpdate();
 }
 
-/// 建连的单飞：connectWS 内部有多个 await（读端口 / 读 token / isServerAlive），
+/// 建连的单飞（E1-02）：connectWS 内部有多个 await（读端口 / 读 token / isServerAlive），
 /// 而调用点有五处（模块求值、onStartup、onInstalled、probe、fastRetry）。
 /// 旧写法只在 await 之后才检查 `ws && readyState <= 1`，于是并发两次调用会各自
 /// `new WebSocket(...)` 建出两条连接 —— daemon 侧看到两个扩展会话，命令与
@@ -5470,7 +6195,7 @@ async function connectWSInner() {
       await handleDaemonAuthHello(socket, data);
       return;
     }
-    // 应用层心跳的回应（{type:'pong'}，无 id）。这是唯一的 RTT 证据，
+    // 应用层心跳的回应（{type:'pong'}，无 id）。：这是唯一的 RTT 证据，
     // 旧实现把「任何入站消息」当 pong 刷新，链路半开时永远判不出来。
     if (data.type === 'pong') {
       if (lastPingAt) lastPongRttMs = Date.now() - lastPingAt;
@@ -5521,7 +6246,7 @@ async function connectWSInner() {
       if (typeof code === 'string') {
         try { const p = JSON.parse(code); if (p && typeof p === 'object') code = p; } catch (_) {}
       }
-      // 方案 C：strict 档位下，无 token 的连接视为「对端身份未确认」，
+      // 报告方案 C：strict 档位下，无 token 的连接视为「对端身份未确认」，
       // 只放行只读命令。默认 compat 不做任何拦截（既有部署零变化）。
       const cmdName = (typeof code === 'object' && code && code.cmd) ? String(code.cmd) : (typeof code === 'string' ? 'exec' : '');
       if (!wsTrustAllowsCommand(cmdName)) {
@@ -5540,7 +6265,15 @@ async function connectWSInner() {
         // Custom protocol message → route to handleExtMessage
         if (code.tabId === undefined && data.tabId !== undefined) code.tabId = data.tabId;
         const res = await handleExtMessage(code, {});
-        sendWsCommandResponse(socket, data.id, { type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error });
+        // inject 的失败回包带结构化 data（executed/threw/error_code）：
+        // 旧的 `{type:'error'}` 会把 data 整个丢掉，daemon 只剩一句字符串。
+        // 这里改走 result 帧；旧 daemon 的 extension_control 仍会因 data.ok=false 报错，
+        // 新 daemon 则能保留字段（协议只加不改）。
+        if (code.cmd === 'inject' && res && res.ok === false && res.data) {
+          sendWsCommandResponse(socket, data.id, { type: 'result', id: data.id, result: res.data });
+        } else {
+          sendWsCommandResponse(socket, data.id, { type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error });
+        }
       } else if (typeof code === 'string') {
         // Plain JS code（把当前 socket 传进去，避免 await 之后读到已被置空的全局 ws）
         await handleWsExec(data, socket);
@@ -5567,7 +6300,7 @@ async function connectWSInner() {
     }
   });
   socket.onclose = async (event) => {
-    // 整个 onclose 都必须用 `ws === socket` 守卫。旧 socket 迟到的 close
+    // ：整个 onclose 都必须用 `ws === socket` 守卫。旧 socket 迟到的 close
     // 曾经也会执行 detachAllDebugSessions('ws-close')，把**新连接**刚重建的
     // Fetch/Network 会话和 attach 全拆掉（表现为「刚连上就丢拦截、横幅又消失」）。
     if (ws !== socket) {
@@ -5809,12 +6542,21 @@ if (chrome.webNavigation?.onCommitted?.addListener) {
       // persistBootReady 只是内存标志，SW 冷启动窗口内它是 false，而 boot 脚本可能
       // 已经在跑 → 这里再重放一次就会执行两遍。用「本次导航」的一次性去重挡住。
       if (!(await claimPersistInjection(details.tabId, details.frameId, details.url))) return;
-      const store = await chrome.storage.local.get({ persistInjections: {} });
-      const map = store.persistInjections || {};
+      // 先清过期条目，避免把死配置当成「这页有注入」反复重放。
+      let map = {};
+      try {
+        const pruned = await pruneExpiredPersistInjections();
+        map = pruned.map;
+      } catch (e) {
+        const store = await chrome.storage.local.get({ persistInjections: {} });
+        map = store.persistInjections || {};
+      }
       for (const [name, entry] of Object.entries(map)) {
+        if (isPersistEntryExpired(entry)) continue;
         if (!matchesPersistPattern(entry.matches, details.url)) continue;
         try {
-          const outcome = await runUserCodeInTab(details.tabId, entry.code, entry.world || 'MAIN', { tabId: details.tabId });
+          const result = await applyPersistEntry(details.tabId, entry, { tabId: details.tabId });
+          const outcome = result.outcome;
           if (!outcome.ok) console.log('[TMWD] persist reinject failed:', name, outcome.error);
         } catch (e) {
           console.log('[TMWD] persist reinject failed:', name, e.message);

@@ -1,6 +1,6 @@
 // 挑战页 / 验证码识别与等待（page_challenge.js）。
 //
-// ---- world 与入口（代码侧注记）----
+// ---- world 与入口----
 // 本文件跑在 **MAIN world**（background.js 的 PAGE_OP_WORLD 决策表：challenge → MAIN）。
 // 原因：判定依赖站点自己挂在页面 window 上的全局 —— `window.turnstile`、
 // `window._cf_chl_opt`、hCaptcha 的 `__hcaptcha_cfg`。ISOLATED world 有独立的
@@ -8,7 +8,7 @@
 // 代价是入口 `window.__abcChallenge` 对页面可见，因此必须：
 //   * 不可枚举（Object.keys(window) / for...in 看不到）；
 //   * 可配置（`delete window.__abcChallenge` 必须成功，否则 stealth scrub 永远
-//     报 remaining 里还有它，见 阅文）。
+// 报 remaining 里还有它，见）。
 // 这两条靠文件末尾的 defineProperty 挂载实现；整个文件包在 IIFE 里，
 // 不再使用顶层 `function __abcChallenge(){}`（classic script 里那是不可删除的
 // 全局绑定，且可枚举）。
@@ -127,7 +127,7 @@ function __abcChallenge(opts) {  opts = opts || {};
     // 没有错误容器时才去扫正文（只取开头一段，同旧口径）。
     // 必须走 bodyTextHead()：旧实现 `String(document.body.textContent).slice(0, 4000)`
     // 的切片发生在**整页序列化之后**，26 万节点的页面上每 250ms 拼一次整页字符串，
-    // 30 秒的 challenge wait 足以把页面卡死（与本文件 TEXT_SCAN 那段同一教训）。
+    // 30 秒的 challenge wait 足以把页面卡死。
     const text = bodyTextHeadCached(CF_TEXT_SCAN_LIMIT);
     if (text && CF_RAY_TEXT.test(text)) evidence.push('cf-ray-id-footer');
     return evidence;
@@ -420,7 +420,7 @@ function __abcChallenge(opts) {  opts = opts || {};
     }
 
     // 页面上的验证码组件（不阻断浏览，但提交前必须完成）
-    // 脚本标签只进 signals；interactive 必须由可见挂载点决定，
+    // v11：脚本标签只进 signals；interactive 必须由可见挂载点决定，
     // 否则「引过 api.js 的正常页面」会被当成永远有待完成组件。
     if (visibleCaptchaMount('.cf-turnstile, [data-sitekey].cf-turnstile')) {
       hit('turnstile', 8, 'widget', false, true, false, 'turnstile-widget');
@@ -513,7 +513,7 @@ function __abcChallenge(opts) {  opts = opts || {};
 
     // 标题兜底：标题空/很短的拦截页，正文里出现「verify you are human」也算。
     // 门槛很高（要遍历正文文本），所以三重门控：文档已加载完 + 上面所有特征都没命中 + 最多每 1s 扫一次。
-    // bodyTextMatches 内部维护「URL + 正文摘要」粘性，换页即重新判定。
+    // bodyTextMatches() 内部维护「URL + 正文摘要」粘性，换页即重新判定。
     if (!vendor && document.readyState === 'complete') {
       if (bodyTextMatches()) {
         hit('cloudflare-interstitial', 6, 'interstitial', true, false, true, 'body-text');
@@ -726,7 +726,7 @@ function __abcChallenge(opts) {  opts = opts || {};
           matched: cleared === true,
           action: 'wait',
           cleared: cleared === true,
-          // 与 status 完全同口径（daemon 的等待循环按字段存在即判定）：
+          // 与 status 完全同口径：
           //   kind       —— 'blocked' 只在 CF 硬拦截证据成立时出现；
           //   hard_block —— 必须叠加 CF 专属证据（cf-error-details / cf-error 容器 /
           //                 页脚 Cloudflare Ray ID）；普通 403 只有 blocking:true；
@@ -839,7 +839,7 @@ function __abcChallenge(opts) {  opts = opts || {};
   return { ok: false, error: 'challenge: 未知 action ' + action };
 }
 
-// 实现标记（与 page_net / page_stealth 同一套）：challenge 跑在
+// 实现标记：challenge 跑在
 // MAIN world，入口全局对页面可见，页面可以抢先把同名函数定义成自己的实现。
 // pageOp 只执行带这个标记的实现。不可枚举：不新增可被 Object.keys 看见的痕迹。
 try {

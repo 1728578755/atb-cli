@@ -1,4 +1,4 @@
-// 收口轮 · CLI 契约守卫。
+// 轮 · CLI 契约守卫。
 //
 // 背景：`--dry-run --async` 曾经在 exec 以外的 14 条命令上**真实执行**动作
 // （`atb click '#pay' --async --dry-run` 会真的点下去）。dry-run 的承诺是
@@ -225,7 +225,7 @@ test('restart 与 set-extension-port 共用「关闭确认」原语', () => {
   assert.match(primitive, /daemon_token_mismatch/, 'token 不匹配时给专属错误码');
 });
 
-// ---- tabs --ids --limit 0 与 full 视图同语义 ------------------
+// ---- /：tabs --ids --limit 0 与 full 视图同语义 ------------------
 
 test('tabs --ids 的 --limit 与 full 视图同样把 0 当「不截断」', () => {
   const tabs = file('cmd_tabs.rs');
@@ -241,7 +241,7 @@ test('tabs --ids 的 --limit 与 full 视图同样把 0 当「不截断」', () 
   assert.match(full, /limit\.filter\(\|value\| \*value > 0\)/, '两个视图口径必须一致');
 });
 
-// ---- Windows 盘符相对路径必须绝对化 ---------------------------
+// ---- /：Windows 盘符相对路径必须绝对化 ---------------------------
 
 test('absolutize_path 处理 Windows 盘符相对路径（C:foo）', () => {
   const http = file('http.rs');
@@ -284,7 +284,7 @@ test('schema 顶层提供 error_code_hints，且覆盖本轮新增的 5 个码',
   );
 });
 
-test('atb status 输出 security 块（ 可见性，只增字段）', () => {
+test('atb status 输出 security 块', () => {
   const status = file('cmd_status.rs');
   const body = fnBody(status, 'security_value');
   assert.ok(body, '应存在 security_value');

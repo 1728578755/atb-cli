@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 把 registry 上的平台包 dist.integrity 写回 package-lock.json（/ 的配套工具）。
+// 把 registry 上的平台包 dist.integrity 写回 package-lock.json。
 //
 // 为什么需要它：平台包的 tarball 由 publish 流水线现场构建，发布之前谁也不可能有它的
 // 哈希，所以「刚 bump 完版本」的 package-lock.json 一定缺 integrity。而 npm ci 对

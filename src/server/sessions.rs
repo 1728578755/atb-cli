@@ -42,7 +42,7 @@ pub(crate) fn sanitize_identity_component(raw: &str) -> String {
     }
 }
 
-/// `preferred_default_session` 的「连续未命中」记账。
+// TA：`preferred_default_session` 的「连续未命中」记账。
 ///
 /// 6h TTL 只解决「永远卡住」，不解决「原默认标签被关掉后长时间无法重建」：
 /// `should_set_default_session` 见到 preferred 就不再改选，于是默认目标在 6 小时内
@@ -153,7 +153,7 @@ pub(crate) async fn apply_tabs_snapshot(
         ws_connections_lock(state).contains_key(&conn_id)
     };
     let mut driver = state.driver.write().await;
-    // 先净化身份分量，后续所有 session_key / TabInfo 都用净化后的值。
+    // TA：先净化身份分量，后续所有 session_key / TabInfo 都用净化后的值。
     let browser_id = sanitize_identity_component(&browser_id);
     let profile_id = sanitize_identity_component(&profile_id);
     // 过期的「待生效默认目标」在这里统一清一次（6h TTL）；之后所有读取
@@ -170,7 +170,7 @@ pub(crate) async fn apply_tabs_snapshot(
             crate::protocol::make_session_key(&browser_id, &profile_id, &tab_id)
         })
         .collect();
-    // preferred 只有在**同一 browser/profile 的连续快照**里反复缺席才作废。
+    // TA：preferred 只有在**同一 browser/profile 的连续快照**里反复缺席才作废。
     // 之前这里只会「出现就清」，于是原默认标签一旦被关掉，preferred 要卡满 6h，
     // `should_set_default_session` 期间一直拒绝重建默认目标（默认目标粘性丢失）。
     if let Some(preferred_key) = driver.preferred_default_session().map(str::to_string) {
@@ -382,7 +382,7 @@ pub(crate) async fn register_opened_session(
                 file_scheme_access: executor.file_scheme_access,
             })
     }) else {
-        // 执行者会话不存在 = 登记失败。早期返回前**不写**任何归属/默认，
+        // TA：执行者会话不存在 = 登记失败。早期返回前**不写**任何归属/默认，
         // 否则失败路径会留下一条指向不存在会话的幽灵默认（下一条命令直接
         // target_lost，且没有任何调用方知道它从哪来）。
         return false;
@@ -401,13 +401,13 @@ pub(crate) async fn register_opened_session(
             driver.clear_preferred_default_session();
         }
         drop(driver);
-        // 登记只在「会话确实可用」之后做（这里是已存在的活会话）。
+        // TA：登记只在「会话确实可用」之后做（这里是已存在的活会话）。
         note_agent_opened(state, &agent, new_key).await;
         remember_agent_default(state, &agent, new_key).await;
         persist_agent_opened(state);
         return true;
     }
-    // 执行者在读锁与写锁之间消失了（并发关闭）时同样按失败处理，
+    // TA：执行者在读锁与写锁之间消失了（并发关闭）时同样按失败处理，
     // 否则我们会给一个已经没有执行者的浏览器登记会话。
     if !driver.sessions.contains_key(executor_key) {
         return false;
@@ -455,13 +455,13 @@ pub(crate) async fn register_opened_session(
         driver.clear_preferred_default_session();
     }
     drop(driver);
-    // insert 成功之后才落归属/默认。放在这里而不是函数开头，失败路径
+    // TA：insert 成功之后才落归属/默认。放在这里而不是函数开头，失败路径
     // （执行者不存在 / 没有可用通道）就不会留下指向空会话的默认目标。
     note_agent_opened(state, &agent, new_key).await;
     remember_agent_default(state, &agent, new_key).await;
     persist_agent_opened(state);
     // 这条会话挂在执行者的通道上，但没有经过任何一次快照，所以必须手工登记到
-    // 该连接的登记表（与 同源）：否则扩展断开时它永远不会被标断开/清理。
+    // 该连接的登记表：否则扩展断开时它永远不会被标断开/清理。
     if executor_conn_alive {
         if let Some(registry) = connection_session_registry(state, &executor.sender) {
             let mut keys = registry
@@ -1074,7 +1074,7 @@ pub(crate) async fn restore_agent_default(state: &AppState, snapshot: Option<For
 /// 「默认标签被关掉之后再也 open 不了」（e2e 实测：cleanup 后 open 本地页直接失败）。
 /// 这里只清失效项，不做任何回退决策——回退仍由 `select_tab` 负责。
 ///
-/// 除了 `session_key`，指向同一条会话的 `preferred_*` 也一并清掉并记录，
+// TA：除了 `session_key`，指向同一条会话的 `preferred_*` 也一并清掉并记录，
 /// 否则「清一半」之后 preferred 仍会把默认目标钉在死会话上。
 pub(crate) async fn forget_stale_agent_default(
     state: &AppState,
@@ -1120,7 +1120,7 @@ pub(crate) async fn forget_session(state: &AppState, session_key: &str) {
     forget_session_inner(state, session_key, false).await;
 }
 
-/// 扩展连接断开时的回收：与 [`forget_session`] 只差**默认目标的记忆**。
+// 扩展连接断开时的回收：与 [`forget_session`] 只差**默认目标的记忆**。
 ///
 /// `session_key` 是确定性拼接（`browser:profile:tabId`），断线重连后同一个 key 会回来。
 /// 真实关闭（`close --tab` / 标签关闭事件 / prune）用 `forget_session`，把默认目标彻底忘掉；
@@ -1133,7 +1133,7 @@ pub(crate) async fn forget_session_after_disconnect(state: &AppState, session_ke
     forget_session_inner(state, session_key, true).await;
 }
 
-/// 断线时是否要把「当前默认目标」记进 preferred。
+// 断线时是否要把「当前默认目标」记进 preferred。
 ///
 /// 只有「这条会话就是默认」且「还没有别的待生效目标」时才记：
 /// 已经有一个 preferred 时说明用户刚 `open` 了另一个标签，那个意图更晚、更明确。
@@ -1163,7 +1163,7 @@ async fn forget_session_inner(state: &AppState, session_key: &str, after_disconn
             driver.clear_preferred_default_session();
         }
     }
-    // 断线与真实关闭都走这里，所以两条路径都会清掉各 agent 的默认引用。
+    // TA：断线与真实关闭都走这里，所以两条路径都会清掉各 agent 的默认引用。
     // 必须在放掉 driver 写锁之后再做（锁序约定 driver → 其它，不能反过来嵌套）。
     clear_agent_defaults_for(state, session_key).await;
     {
@@ -1171,7 +1171,7 @@ async fn forget_session_inner(state: &AppState, session_key: &str, after_disconn
         // 同一标签重连后 key 不变，但旧任务仍可能持着旧 Mutex 在注入。此时若删掉，
         // 新任务会通过 `entry().or_insert_with()` 建出第二把锁，同一标签就被并发注入。
         // 判据：登记表是唯一持有者（strong_count == 1）才安全删除。
-        // 与 [`gc_session_locks`] 的判据必须**完全一致**——那边
+        // TA：与 [`gc_session_locks`] 的判据必须**完全一致**——那边
         // `retain(strong_count > 1)`（即只回收 ==1 的），这边只在 ==1 时 remove；
         // 两边判据相反时会出现「这里删掉正在被持有的锁 / 那边永远回收不掉」的矛盾。
         let mut locks = state.session_locks.lock().await;
@@ -1259,10 +1259,13 @@ pub(crate) async fn select_tab(state: &AppState, selector: SessionSelector) -> R
         }
         drop(driver);
     }
+    // 2026-11-13：把解析结果写进请求级 task-local，响应中间件据此补
+    // resolved_target / browser / profile / tab_hidden 警告。
+    record_resolved_target(state, &session_key).await;
     Ok(session_key)
 }
 
-/// 多浏览器并存时的「隐式默认」提示。
+// 多浏览器并存时的「隐式默认」提示。
 ///
 /// 只在「本次没有显式指定目标」（没有 --tab / --browser / --profile）**且**当前同时连着
 /// ≥2 个浏览器时返回一句话；其它情况返回 `None`。纯说明性字段：不改变选标签结果、
@@ -1559,7 +1562,20 @@ pub(crate) fn session_error_json(err: &anyhow::Error) -> Value {
             "retryable": false,
         });
     }
-    json!({ "ok": false, "error": err.to_string() })
+    // 扩展回包里的错误常是嵌套 JSON（`{"error":{"message":"SyntaxError..."}}`）。
+    // 在最终出口做一次剥壳，避免调用方拿到整段 eval 栈却找不到原因。
+    let text = humanize_extension_error(&err.to_string());
+    // 浏览器报 SyntaxError 说明脚本一行都没执行：这是「命令写错」，按 exit 2 处理
+    // 比 exit 1（可重试）更准确，也避免 Agent 反复重试同一段坏脚本。
+    if text.contains("SyntaxError") {
+        return json!({
+            "ok": false,
+            "error": text,
+            "error_code": "invalid_js",
+            "hint": "脚本语法错误，浏览器没有执行任何代码：修正后重试；本地检查误报时可用 --no-preflight",
+        });
+    }
+    json!({ "ok": false, "error": text })
 }
 
 /// 目标类错误（不可重试）的简写。
@@ -1815,7 +1831,7 @@ pub(crate) fn resolve_session(
             // 用户看到的是「我明明在操作 A 的页面，结果改的是 B」，且不会报错。
             // 显式失败 + 一条可执行的恢复路径（重新 open）才是可诊断的行为。
             //
-            // 例外是 `default` 桶（裁决）：它是「没有声明身份的调用方」的共享桶，
+            // 例外是 `default` 桶：它是「没有声明身份的调用方」的共享桶，
             // 全局 default/latest 本来就是它自己的目标，回退不构成跨智能体串线；
             // 这里若也报 target_lost，单用户手动关掉默认标签后 `atb read` 会突然失效，
             // 属于破坏性变更。所以只有具名 agent 才享受「宁失败不串线」的严格语义。
@@ -1838,7 +1854,7 @@ pub(crate) fn resolve_session(
         }
     }
 
-    // 走到这里说明具名 agent 没有任何可用目标（从没 open 过，或默认/待生效
+    // TA：走到这里说明具名 agent 没有任何可用目标（从没 open 过，或默认/待生效
     // 都已失效）。`strict` 档下不得回退到全局 default/latest/任意 active——
     // 那等于把 A 的命令打到 B 的标签上，而且成功得毫无提示。
     // `legacy` 是默认档：保持旧行为（回退），由回包里的 `isolation:"legacy"` 标明。
@@ -1880,7 +1896,7 @@ pub(crate) fn resolve_session(
             })
         })
         .or_else(|| {
-            // 最终兜底必须**确定**。旧实现取 `values.find(is_active)`，
+            // 最终兜底必须**确定**。旧实现取 `values().find(is_active)`，
             // 结果随 HashMap 迭代顺序变化：同一条命令在 daemon 重启前后可能落到不同
             // 标签，而且这个随机结果还会被 `select_tab` 写成 default「粘住」。
             // 复用与 `sort_tabs_canonical` 相同的比较口径（browser → profile →

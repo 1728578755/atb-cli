@@ -38,7 +38,7 @@
 // 4) 入口定义：整个文件包在 IIFE 里，末尾用 defineProperty 把 __abcNet 挂到 window，
 //    而不是写成顶层 `function __abcNet(){}`。原因有两条，都实测过：
 //    a. 顶层函数声明在 classic script（扩展 executeScript({files}) 路径）里创建的是
-// **non-configurable** 全局绑定 —— 这个位是 内部的 DONT_DELETE，
+//       **non-configurable** 全局绑定 —— 这个位是 V8 内部的 DONT_DELETE，
 //       getOwnPropertyDescriptor 上看不出来（configurable 仍报 true），但
 //       `delete window.__abcNet` 恒返回 false。结果 scrub 永远清不掉这个入口。
 //       （daemon 的 eval 路径没有这个问题，但两条路径必须都给对。）
@@ -68,7 +68,7 @@ function __abcNet(opts) {
   const STATE_PREFIX = '__atb_net_';
   const LEGACY_STATE_KEY = '__abcNetState';
 
-  /// wrapper 归属标记。
+  // wrapper 归属标记。
   ///
   /// 旧实现只靠 `state.installed` 防重复包装：状态槽被 scrub / reset 删掉后，
   /// 下一次注入会新建一份空 state，并把**已经是我们自己的 wrapper** 当成「原始 fetch」
@@ -318,12 +318,12 @@ function __abcNet(opts) {
 
   /// 只认**自有**属性：页面污染 Object.prototype（`Object.prototype.status = 200`）
   /// 之后，`rule.status !== undefined` 会对所有规则恒真 → isMock 恒真 → 所有命中规则的
-  /// 请求都被伪造。规则对象来自 JSON，走 hasOwnProperty 即可。
+  // 请求都被伪造。规则对象来自 JSON，走 hasOwnProperty 即可。
   function own(obj, key) {
     return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
   }
 
-  /// 相对 URL 先解析成绝对 URL 再参与匹配。
+  // 相对 URL 先解析成绝对 URL 再参与匹配。
   /// 页面写 `fetch('/api/user')` 时匹配目标只有 "/api/user"，用户按直觉配的
   /// `match:"example.com/api"` 永远不命中，而 `net route` 自己返回 ok、日志记「未命中」
   /// —— 静默失配，极难排查。日志里仍保留页面原本写的相对 URL。
@@ -336,7 +336,7 @@ function __abcNet(opts) {
   ///
   /// 以前是「子串不中就用 new RegExp(match) 再试一次」：字面量里的 `.` `?` `+`
   /// 在正则分支意外获得通配语义（`app.js` 会命中 `appXjs`），用户无法表达
-  /// 「只按字面匹配」，而且每个请求每条规则都要重编译一次正则。
+  // 「只按字面匹配」，而且每个请求每条规则都要重编译一次正则。
   /// 为了不打断已经在用的正则写法，字符串里带明显正则元字符时仍走回退分支；
   /// 想强制关掉回退可以写 `regex:false`。
   const REGEX_LOOKING = /[\^$*+?()[\]{}|\\]/;
@@ -438,7 +438,7 @@ function __abcNet(opts) {
   ///
   /// 只在实例上还没有 own readyState 时补一个，并留下 `__abcNetOwnReady` 标记：
   /// 复用同一个 xhr 再发真实请求时，open() 靠这个标记**只删我们自己打的补丁**，
-  /// 不会误删页面/框架原本就在实例上设的值。
+  // 不会误删页面/框架原本就在实例上设的值。
   function fakeReadyState(xhr) {
     if (Object.getOwnPropertyDescriptor(xhr, 'readyState')) return;
     try {
@@ -549,7 +549,7 @@ function __abcNet(opts) {
   //
   // `clone.text()` 要等整个 body 结束。对 text/event-stream 这类**永不结束**的流，
   // 页面自己的 fetch Promise 就永远不 resolve —— 聊天流、进度推送、视频分片全挂死
-  // （。所以：
+  //。所以：
   //   * 捕获走旁路（不 await）：日志条目先落盘、preview 后补；
   //   * 改写只动 status/headers 时透传 response.body 流，不缓冲；
   //   * 命中流式/超大响应且规则没给 body 时跳过改写，并标明原因。
@@ -560,7 +560,7 @@ function __abcNet(opts) {
   // 现在：超时硬上限 + reader.cancel()，并由 content-type 白名单挡掉二进制。
   const DEFAULT_BODY_TIMEOUT_MS = 1500;
   const MAX_BODY_TIMEOUT_MS = 10000;
-  /// 规则条数上限：与 daemon 的 `ATB_NET_RULE_MAX_RULES`（默认 64）同口径。
+  // 规则条数上限：与 daemon 的 `ATB_NET_RULE_MAX_RULES`（默认 64）同口径。
   ///
   /// 两边必须是**同一个数字**：daemon 在新增规则时按它报 `too_many_rules`，页面在
   /// 「持久注入重放」时按它裁剪。历史实现这里是 50、daemon 是 64，于是 51~64 条规则
@@ -593,7 +593,7 @@ function __abcNet(opts) {
     try { length = Number(response.headers.get('content-length') || 0); } catch (_) {}
     if (type.indexOf('text/event-stream') >= 0) return 'streaming_response (text/event-stream)';
     if (length > MAX_CAPTURE_BYTES) return 'content_length ' + length + ' > ' + MAX_CAPTURE_BYTES;
-    // 二进制（图片/字体/视频分片）不做捕获：clone.text 会把它按 解码，
+    // 二进制（图片/字体/视频分片）不做捕获：clone().text() 会把它按 UTF-8 解码，
     // 体积膨胀几十倍、内容全是乱码，对诊断没有价值。
     // 没有 content-type 时不跳过（宁可多读一次），没有 content-length 也不再跳过 ——
     // chunked 流由超时兜住。
@@ -605,7 +605,7 @@ function __abcNet(opts) {
 
   /// 旁路读取响应体：不 await（页面自己的 fetch 不等这条），但**必须有上限**。
   /// 优先用 reader 逐块读：超时能 cancel；`clone().text()` 没有取消入口，
-  /// 遇到永不结束的 chunked 流就是永久挂起。
+  // 遇到永不结束的 chunked 流就是永久挂起。
   function captureBody(response, entry) {
     const limitMs = captureTimeoutMs();
     let reader = null;
@@ -676,8 +676,8 @@ function __abcNet(opts) {
 
   /// 构造 mock 响应。以前这段在 try **之外**：规则写 `status:204`（无内容响应是很
   /// 常见的 mock 需求）同时带 body 时 `new Response` 抛 TypeError，异常从包装器同步
-  /// 抛出 → 页面 fetch 直接 reject，且一条日志都没有，`net log` 里查不到这次请求。
-  /// 现在：无内容状态码强制 body=null，任何构造失败都记
+  /// 抛出 → 页面 fetch 直接 reject，且一条日志都没有，`net log` 里查不到这次请求
+  // 。现在：无内容状态码强制 body=null，任何构造失败都记
   /// `mock_invalid` 并放行真实请求。
   function buildMockResponse(rule, url, method, started) {
     const status = rule.status === undefined ? 200 : Number(rule.status);
@@ -807,7 +807,7 @@ function __abcNet(opts) {
     state.xhrGuarded = true;
   }
 
-  /// 把 originals 的 XHR 基线对齐到**当前**原型方法（见 install 分支③）。
+  // 把 originals 的 XHR 基线对齐到**当前**原型方法。
   /// 当前方法是我们自己的 wrapper 时保持原基线，否则新 wrapper 会调自己 → 无限递归。
   function rebaseXhrOriginals(originals) {
     const proto = XMLHttpRequest.prototype;
@@ -882,7 +882,7 @@ function __abcNet(opts) {
         if (state.fetchWrapper) state.fetch_replaced = true;
         next.fetch = currentFetch;
       }
-      // fetch 之外，XHR 三个方法也必须重定基线。
+      // ：fetch 之外，XHR 三个方法也必须重定基线。
       //
       // 为什么会走到这里：`window.fetch !== state.fetchWrapper`，也就是「页面在我们
       // 装好之后换过 fetch，或把我们的 wrapper 顶掉了」。这时要装新 wrapper，而新
@@ -1073,8 +1073,8 @@ function __abcNet(opts) {
       this.__abcNetRespSpec = null;
       try { delete this.__abcNetRespBuilt; } catch (_) {}
       // 同一个 XHR 反复 open/send 时，上一轮 send 里注册的 loadend 记账监听器
-      // 还挂在实例上 —— 每轮多一条日志、多一次 rewriteOf，长轮询页面上会线性膨胀。
-      // 这里按保存的引用精确摘掉自己注册的那一个，不用 removeAll 误伤页面。
+      // 还挂在实例上 —— 每轮多一条日志、多一次 rewriteOf，长轮询页面上会线性膨胀
+      //。这里按保存的引用精确摘掉自己注册的那一个，不用 removeAll 误伤页面。
       if (this.__abcNetLoadend) {
         try { this.removeEventListener('loadend', this.__abcNetLoadend); } catch (_) {}
         this.__abcNetLoadend = null;
@@ -1145,7 +1145,7 @@ function __abcNet(opts) {
           response: null
         };
         setTimeout(function () {
-          // 事件只派发一次：旧实现先手动 `xhr.onreadystatechange` 再
+          // 事件只派发一次：旧实现先手动 `xhr.onreadystatechange()` 再
           // `dispatchEvent(new Event('readystatechange'))`，凡是 onreadystatechange
           // 与 addEventListener('readystatechange') 都注册的页面会收到两次回调
           // （fetch 封装 / 重试队列里会重复解析、重复 push）。dispatchEvent 本身
@@ -1199,7 +1199,7 @@ function __abcNet(opts) {
         };
       }
 
-      // 记账监听器要留引用：open 复用同一个 XHR 时要精确摘掉。
+      // 记账监听器要留引用：open() 复用同一个 XHR 时要精确摘掉。
       const onLoadend = function () {
         const computed = rule && rule.response ? rewriteOf(xhr) : null;
         const entry = {
@@ -1244,12 +1244,12 @@ function __abcNet(opts) {
     if (responseType === 'base64') {
       const buffer = await response.arrayBuffer();
       const bytes = new Uint8Array(buffer);
-      // base64 相对原始字节的膨胀比是 4/3，要拿到 maxChars 个字符
+      // E1-10：base64 相对原始字节的膨胀比是 4/3，要拿到 maxChars 个字符
       // 只需要读约 0.75 * maxChars 字节；先截断再编码，避免把整页 base64 塞进内存。
       const maxBytes = Math.max(1, Math.ceil(maxChars * 0.75));
       const limit = Math.min(bytes.length, maxBytes);
       // 分块 String.fromCharCode.apply：逐字节 `binary +=` 在大页面上是 O(n²) 字符串
-      // 拼接，会卡死页面。0x8000 一块也远低于各引擎的 apply 参数上限。
+      // 拼接，会卡死页面（E1-10）。0x8000 一块也远低于各引擎的 apply 参数上限。
       const CHUNK = 0x8000;
       let binary = '';
       for (let i = 0; i < limit; i += CHUNK) {
@@ -1264,7 +1264,7 @@ function __abcNet(opts) {
       };
     }
     // 文本分支：直接用 reader 流式读，累计到 maxChars 就 cancel，避免先
-    // `response.text` 全量缓冲再 slice。没有 getReader 的老实现 /
+    // `response.text()` 全量缓冲再 slice（E1-10）。没有 getReader 的老实现 /
     // 测试桩（mock Response）退回原来的 text() 路径。
     if (response.body && typeof response.body.getReader === 'function'
         && typeof TextDecoder !== 'undefined') {
@@ -1392,12 +1392,12 @@ function __abcNet(opts) {
         ? Math.min(MAX_BODY_TIMEOUT_MS, Math.max(100, raw))
         : 0;
     }
-    // maxLog 之前没有上限，`--max-log 100000000` 会把整个进程的内存吃光。
+    // E1-11：maxLog 之前没有上限，`--max-log 100000000` 会把整个进程的内存吃光。
     // 下限 10 保证还能看到最近的几条；上限 20000 条足够诊断，再大就该用 match 过滤。
     if (opts.maxLog > 0) {
       state.maxLog = Math.min(20000, Math.max(10, Math.floor(opts.maxLog)));
       // 收紧上限时立刻裁剪：否则要等下一条日志进来才生效，刚 `--max-log 10`
-      // 就 `net log` 仍会看到旧的几千条（-22b）。
+      // 就 `net log` 仍会看到旧的几千条。
       if (state.log.length > state.maxLog) state.log.splice(0, state.log.length - state.maxLog);
     }
     // 持久注入重放时会带上已有规则，避免刷新后规则丢失。

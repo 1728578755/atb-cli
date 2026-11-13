@@ -4,7 +4,23 @@
 (async () => {
   try {
     const store = await chrome.storage.local.get({ persistInjections: {} });
-    const entries = Object.entries(store.persistInjections || {});
+    const now = Date.now();
+    const allEntries = Object.entries(store.persistInjections || {});
+    if (!allEntries.length) return;
+
+    // 过期条目不再重放。清理交给 SW（内容脚本不能直接写整份 map，
+    // 会覆盖并发的 persist）；这里只发一条消息、不等结果，绝不阻塞本次注入。
+    const entries = allEntries.filter(([, entry]) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const at = Number(entry.expiresAt);
+      return !(Number.isFinite(at) && at > 0 && at <= now);
+    });
+    if (entries.length !== allEntries.length) {
+      try {
+        const pending = chrome.runtime.sendMessage({ type: 'persist-prune-expired' });
+        if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+      } catch (_) {}
+    }
     if (!entries.length) return;
 
     const url = location.href;
@@ -88,10 +104,19 @@
 
     const hits = entries
       .filter(([, entry]) => matches(entry.matches, url))
-      .map(([name, entry]) => ({ name, code: entry.code, world: entry.world || 'MAIN' }));
+      .map(([name, entry]) => ({
+        name,
+        code: entry.code,
+        world: entry.world || 'MAIN',
+        // SW 优先用 storage 里的最新条目；这些字段只作为 storage 读取失败时的兜底。
+        userscript: entry.userscript === true,
+        gmNamespace: entry.gmNamespace || null,
+        cleanupSelectors: Array.isArray(entry.cleanupSelectors) ? entry.cleanupSelectors : [],
+        cleanupCode: entry.cleanupCode || null
+      }));
     if (!hits.length) return;
 
-    // 旧实现 `sendMessage(...).catch(=>{})` —— 既不 await 也不看回包。
+    // 旧实现 `sendMessage(...).catch(()=>{})` —— 既不 await 也不看回包。
     // document_start 阶段 SW 常常还在启动（或刚被回收），消息会失败；
     // 那时这页的持久注入就**永久丢失**了，连一条日志都没有。
     // 现在：await + 校验 ok / applied，本地重试 2 次（50/150ms 退避），

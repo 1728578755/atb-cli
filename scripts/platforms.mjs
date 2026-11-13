@@ -3,7 +3,7 @@
 // 不持有任何平台数据。
 //
 // 为什么要有这一层：
-//   平台清单此前在 package-platform.mjs、npm/bin/atb.js、
+//   平台清单此前在多个脚本与 npm/bin/atb.js、
 //   publish.yml 的 matrix、mirror-sync 的 packages 数组里各写一遍，5+ 处手工同步。
 //   漏一处的后果不是报错而是「静默错配」：package.json 有该平台包、matrix 不构建它，
 //   用户 npm 装到的 optionalDependency 永远 404。

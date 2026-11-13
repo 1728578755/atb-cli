@@ -184,6 +184,7 @@ code,
 .input,
 .select {
   min-height: var(--control-h);
+  height: var(--control-h);
   width: 100%;
   padding: 0 9px;
   border: 1px solid var(--border-strong);
@@ -219,6 +220,7 @@ code,
 .input-sm,
 .select-sm {
   min-height: 26px;
+  height: 26px;
   font-size: var(--text-xs);
 }
 
@@ -274,6 +276,7 @@ input[type="checkbox"]:focus-visible {
   font-weight: 600;
   color: var(--text-3);
   letter-spacing: 0.01em;
+  line-height: var(--lh-tight);
 }
 
 .field-row {
@@ -427,6 +430,7 @@ input[type="checkbox"]:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 20px;
   margin-bottom: 8px;
 }
 
@@ -435,6 +439,7 @@ input[type="checkbox"]:focus-visible {
   font-weight: 700;
   color: var(--text);
   letter-spacing: 0.01em;
+  line-height: var(--lh-tight);
 }
 
 .card-sub {
@@ -442,6 +447,7 @@ input[type="checkbox"]:focus-visible {
   color: var(--text-3);
   text-align: right;
   min-width: 0;
+  line-height: var(--lh-tight);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -468,6 +474,7 @@ input[type="checkbox"]:focus-visible {
   color: var(--text-2);
   font-size: var(--text-xs);
   font-weight: 600;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -579,7 +586,8 @@ input[type="checkbox"]:focus-visible {
 
 .kv-row {
   display: grid;
-  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  /* 固定 label 列宽：.kv-row 每行都是独立 grid，auto/max-content 会让各行 dt 宽度不同。 */
+  grid-template-columns: var(--kv-label-w, 84px) minmax(0, 1fr);
   gap: 10px;
   align-items: baseline;
   padding: 5px 0;

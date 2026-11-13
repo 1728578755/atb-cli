@@ -143,7 +143,7 @@ pub fn env_compat(suffix: &str) -> Option<std::ffi::OsString> {
     env::var_os(format!("AGENT_BROWSER_CLI_{suffix}"))
 }
 
-/// 用户主目录的**唯一**解析入口。
+// 用户主目录的**唯一**解析入口。
 ///
 /// 旧实现有三套口径：配置用 `HOME`/`USERPROFILE`、`~` 展开与 daemon cwd 用
 /// `dirs::home_dir()`。Windows Git-Bash / WSL 下 `HOME` 可能指向 `/home/...`，
@@ -479,8 +479,8 @@ fn lock_path(path: &Path) -> PathBuf {
 
 /// Windows：去掉继承权限与已知宽松 ACE，只保留当前用户可读写。
 ///
-/// 身份优先用当前进程的 SID（`whoami /user` 解析出 `-5-21-...`，用 icacls 的
-/// `*-...` 形式授权），拿不到才退回 `USERDOMAIN\USERNAME`。
+/// 身份优先用当前进程的 SID（`whoami /user` 解析出 `S-1-5-21-...`，用 icacls 的
+// `*S-1-...` 形式授权），拿不到才退回 `USERDOMAIN\USERNAME`。
 /// 旧实现只用可伪造的 `USERNAME`，且在已有显式 ACE 时 `grant:r` 不会移除那些宽松项。
 ///
 /// 失败返回 `Err` 交由调用方打印警告：权限收紧是加固动作，不该让 daemon 起不来，
@@ -544,7 +544,7 @@ fn restrict_windows_acl(path: &Path) -> Result<(), String> {
     }
 }
 
-/// 当前用户身份：优先 `*-...`（icacls 的 SID 形式），否则 `DOMAIN\User`。
+/// 当前用户身份：优先 `*S-1-...`（icacls 的 SID 形式），否则 `DOMAIN\User`。
 #[cfg(windows)]
 fn current_user_identity() -> Option<String> {
     if let Some(sid) = current_user_sid() {
@@ -582,7 +582,7 @@ fn current_user_sid() -> Option<String> {
 /// 给目标文件和它的 `.bak` 都收紧权限。
 ///
 /// 只收紧目标是不够的：`.bak` 里可能是上一版 token / 配置，权限宽松等于白收紧
-/// 主文件。`pub(crate)` 是给 `cli/trust.rs` 复用：
+// 主文件。`pub(crate)` 是给 `cli/trust.rs` 复用：
 /// 对 `.tmp`、最终文件、`.bak` 都可直接调用。
 #[cfg(windows)]
 pub(crate) fn restrict_file_and_backup_acl(path: &Path) -> Result<(), String> {
@@ -735,7 +735,7 @@ pub fn replace_file_atomically(temp_path: &Path, target: &Path) -> std::io::Resu
 ///
 /// 锁：本函数在 `write_file_locked` 的排他锁内被调用；token 读方
 /// （`read_token_target_locked`）在同一把 `*.lock` 上取共享锁，因此不会出现
-/// 「读方刚发现目标缺失、备份就被删掉」的竞态。若有调用方直接调用
+// 「读方刚发现目标缺失、备份就被删掉」的竞态。若有调用方直接调用
 /// `replace_file_atomically`，需自行持有同一把锁。
 #[cfg(windows)]
 fn cleanup_stale_backup(target: &Path) {
@@ -1103,13 +1103,13 @@ mod tests {
         let dir = temp_dir("log-private");
         let path = with_home(&dir, || ensure_log_file().expect("ensure log"));
         let file_mode = fs::metadata(&path).expect("stat log").permissions().mode() & 0o777;
-        assert_eq!(file_mode, 0o600, "daemon.log 必须是 0600（SEC-04）");
+        assert_eq!(file_mode, 0o600, "daemon.log 必须是 0600");
         let dir_mode = fs::metadata(dir.join("logs"))
             .expect("stat log dir")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(dir_mode, 0o700, "日志目录必须是 0700（SEC-04）");
+        assert_eq!(dir_mode, 0o700, "日志目录必须是 0700");
         fs::remove_dir_all(&dir).ok();
     }
 }

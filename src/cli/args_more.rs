@@ -31,6 +31,12 @@ pub(crate) struct WaitArgs {
     /// 在指定 iframe 内等待
     #[arg(long)]
     pub(crate) frame: Option<i64>,
+    /// 等 DOM 连续静默（默认 500ms，可用 `--dom-stable 800` 指定）；适合等框架渲染完
+    #[arg(long = "dom-stable", num_args = 0..=1, default_missing_value = "0")]
+    pub(crate) dom_stable: Option<u64>,
+    /// 等页面在途请求归零并静默（默认 500ms，可用 `--network-idle 800` 指定）
+    #[arg(long = "network-idle", num_args = 0..=1, default_missing_value = "0")]
+    pub(crate) network_idle: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -135,6 +141,10 @@ pub(crate) struct OpenArgs {
     /// 「标签可操作」，不保证首屏有内容。
     #[arg(long = "wait-for", value_name = "COND")]
     pub(crate) wait_for: Option<String>,
+    /// `--wait-for` 的独立预算（秒）；不传时普通页面用 --timeout，
+    /// chrome:// / chrome-extension:// / about: 等特殊页面用 ATB_OPEN_SPECIAL_WAIT_SEC（默认 3s）
+    #[arg(long = "wait-for-timeout", value_name = "SEC")]
+    pub(crate) wait_for_timeout: Option<f64>,
     /// 打开前先对目标浏览器/profile 发一次轻量请求唤醒扩展 service worker。
     /// 旧实现冷启动时第一条 open 经常因 SW 未唤醒而慢几秒甚至超时；ping 失败
     /// 会重试一次再打开，不因 ping 失败而拒绝打开。
@@ -341,4 +351,127 @@ pub(crate) struct ProfileLabelClearArgs {
     pub(crate) tab: Option<String>,
     #[arg(long, default_value_t = 30.0)]
     pub(crate) timeout: f64,
+}
+
+// ---------------------------------------------------------------------------
+// 2026-11-13 改进轮：目标身份 / 环境快照 / 扩展列表 / 元素量测 / 用户脚本
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+#[command(after_help = r#"
+示例:
+  atb focus --tab @latest
+  atb focus --tab url:example.com --no-window
+  atb focus --tab current"#)]
+pub(crate) struct FocusArgs {
+    /// 目标标签页（默认当前 agent 的默认目标）；支持 tabs / 序号 / url: 等全部语法
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+    /// 只激活标签页，不把浏览器窗口抢到系统前台
+    #[arg(long = "no-window")]
+    pub(crate) no_window: bool,
+    #[arg(long, default_value_t = 15.0)]
+    pub(crate) timeout: f64,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = r#"
+示例:
+  atb use @latest
+  atb use 1234567890
+  atb use url:example.com"#)]
+pub(crate) struct UseArgs {
+    /// 要固定为默认目标的标签页（tabs / @N / url: / title: 等）
+    pub(crate) target: String,
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = r#"
+示例:
+  atb env
+  atb env --pretty"#)]
+pub(crate) struct EnvArgs {
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+    /// 用哪个标签页查持久注入（默认当前智能体的默认目标）
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    /// 只列指定数量标签页摘要（默认 10）
+    #[arg(long, default_value_t = 10)]
+    pub(crate) tab_limit: usize,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = r#"
+示例:
+  atb extensions
+  atb extensions --include-disabled"#)]
+pub(crate) struct ExtensionsArgs {
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+    /// 包含已停用的扩展
+    #[arg(long = "include-disabled")]
+    pub(crate) include_disabled: bool,
+    #[arg(long, default_value_t = 15.0)]
+    pub(crate) timeout: f64,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = r#"
+示例:
+  atb measure --selector '#chart'
+  atb measure --selector 'my-app >>> .card' --styles display,position,width,height
+  atb measure --selector '#app' --with-text"#)]
+pub(crate) struct MeasureArgs {
+    /// CSS 选择器或 `host >>> inner` shadow 选择器（不支持 @e 引用）
+    #[arg(long)]
+    pub(crate) selector: String,
+    /// 逗号分隔的 computed style 名称（默认 display/position/width/height/zIndex）
+    #[arg(long, value_name = "LIST")]
+    pub(crate) styles: Option<String>,
+    /// 同时返回元素可见文本（截断到 200 字符）
+    #[arg(long = "with-text")]
+    pub(crate) with_text: bool,
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+    #[arg(long)]
+    pub(crate) frame: Option<i64>,
+    #[arg(long, default_value_t = 30.0)]
+    pub(crate) timeout: f64,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = r#"
+示例:
+  atb userscript ./script.user.js
+  atb userscript https://example.com/app.user.js --tab @latest"#)]
+pub(crate) struct UserscriptArgs {
+    /// 本地 .user.js 文件或 http(s) URL
+    pub(crate) source: String,
+    /// 在哪个标签页里打开安装页（默认当前 agent 的默认目标）
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+    /// 只校验元数据并输出解析结果，不打开安装页
+    #[arg(long = "parse-only")]
+    pub(crate) parse_only: bool,
 }

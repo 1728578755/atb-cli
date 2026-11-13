@@ -23,6 +23,10 @@ pub(crate) enum ConsoleAction {
     List(ConsoleListArgs),
     Clear(TabOnlyArgs),
     Stop(TabOnlyArgs),
+    /// 一次性取回页面已产生的 console / error / unhandledrejection（含加载期报错）
+    History(ConsoleHistoryArgs),
+    /// 轮询式跟随输出（默认 10 秒，可 --duration 加长）
+    Tail(ConsoleTailArgs),
 }
 
 #[derive(Debug, Args)]
@@ -47,6 +51,80 @@ pub(crate) enum JobAction {
     Wait(JobWaitArgs),
     /// 请求取消任务（协作式：等待类任务立即停止）
     Cancel(JobCancelArgs),
+    /// 流式跟踪任务进度（JSONL，一行一个状态快照，直到结束或超时）
+    Tail(JobTailArgs),
+    /// 取回 exec 超时后暂存的迟到结果（exec_id 见超时错误信息）
+    Result(JobResultArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct JobTailArgs {
+    pub(crate) id: String,
+    /// 轮询间隔（秒）
+    #[arg(long, default_value_t = 0.5)]
+    pub(crate) interval: f64,
+    /// 最长跟踪时间（秒）；0 表示直到任务结束
+    #[arg(long, default_value_t = 600.0)]
+    pub(crate) timeout: f64,
+    /// 每个快照输出为紧凑 JSON（默认 true；--human 时输出人读行）
+    #[arg(long)]
+    pub(crate) human: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct JobResultArgs {
+    /// exec 超时错误里给出的 exec_id
+    pub(crate) id: String,
+    /// 等待结果出现的最长秒数（默认 5；长任务可加大）
+    #[arg(long, default_value_t = 5.0)]
+    pub(crate) wait: f64,
+    #[arg(long, default_value_t = 0.5)]
+    pub(crate) interval: f64,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConsoleHistoryArgs {
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+    /// 采样窗口（毫秒）；默认 ATB_CONSOLE_HISTORY_SETTLE_MS（300）
+    #[arg(long = "settle-ms")]
+    pub(crate) settle_ms: Option<u64>,
+    /// 只要这些类型（逗号分隔：error,warn,log,info,debug,rejection）
+    #[arg(long, value_name = "TYPES")]
+    pub(crate) types: Option<String>,
+    /// 采样前先清空当前缓冲
+    #[arg(long)]
+    pub(crate) clear: bool,
+    #[arg(long, default_value_t = 200)]
+    pub(crate) limit: usize,
+    #[arg(long, default_value_t = 30.0)]
+    pub(crate) timeout: f64,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConsoleTailArgs {
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    #[arg(long)]
+    pub(crate) browser: Option<String>,
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+    /// 跟随总时长（秒）
+    #[arg(long, default_value_t = 10.0)]
+    pub(crate) duration: f64,
+    /// 轮询间隔（秒）
+    #[arg(long, default_value_t = 0.5)]
+    pub(crate) interval: f64,
+    #[arg(long, value_name = "TYPES")]
+    pub(crate) types: Option<String>,
+    #[arg(long, default_value_t = 200)]
+    pub(crate) limit: usize,
+    #[arg(long, default_value_t = 30.0)]
+    pub(crate) timeout: f64,
 }
 
 #[derive(Debug, Args)]
@@ -268,11 +346,35 @@ pub(crate) struct ActionArgs {
 pub(crate) struct InjectArgs {
     /// 脚本内容；也可用 --file 读文件（--list / --remove 时省略）
     pub(crate) script: Option<String>,
+    /// 脚本文件；`-` 读 stdin
     #[arg(long)]
     pub(crate) file: Option<PathBuf>,
-    /// 命名持久注入：每次页面导航后自动重放
+    /// 按油猴脚本环境执行：注入最小 GM shim（GM_getValue/GM_setValue/
+    /// GM_registerMenuCommand/unsafeWindow 等），并从 `==UserScript==` 元数据取名字
+    #[arg(long)]
+    pub(crate) userscript: bool,
+    /// GM_* 存储命名空间（默认取脚本 @name 或文件名）
+    #[arg(long = "gm-namespace", value_name = "NAME")]
+    pub(crate) gm_namespace: Option<String>,
+    /// 注入前先删除匹配的元素（可多次），避免旧宿主节点残留
+    #[arg(long = "cleanup-selector", value_name = "CSS")]
+    pub(crate) cleanup_selectors: Vec<String>,
+    /// 注入前执行的清理脚本文件（例如删除旧全局变量、旧宿主节点）
+    #[arg(long = "cleanup-file", value_name = "FILE")]
+    pub(crate) cleanup_file: Option<PathBuf>,
+    /// 命名持久注入：每次页面导航后自动重放。默认 2 小时后过期；
+    /// 永久驻留必须同时给 --persist-forever --i-know-this-is-long-lived
     #[arg(long, conflicts_with_all = ["remove", "list"])]
     pub(crate) persist: Option<String>,
+    /// 持久注入寿命（秒）；不传时用 ATB_INJECT_PERSIST_DEFAULT_TTL_SEC（默认 7200）
+    #[arg(long = "ttl", value_name = "SEC")]
+    pub(crate) ttl: Option<u64>,
+    /// 持久注入永不过期；必须同时给 --i-know-this-is-long-lived
+    #[arg(long = "persist-forever", requires = "i_know_this_is_long_lived")]
+    pub(crate) persist_forever: bool,
+    /// 确认知道持久注入会与页面/其它用户脚本长期共存
+    #[arg(long = "i-know-this-is-long-lived")]
+    pub(crate) i_know_this_is_long_lived: bool,
     /// 移除已持久化的注入
     #[arg(long, conflicts_with = "list")]
     pub(crate) remove: Option<String>,
@@ -282,7 +384,7 @@ pub(crate) struct InjectArgs {
     /// 执行环境 main / isolated（大小写不敏感）
     ///
     /// 与 `exec --world` 同口径：自由字符串会被扩展静默落成 MAIN，用户以为切到了
-    /// isolated（同类漏网）。
+    // isolated。
     #[arg(
         long,
         default_value = "main",
@@ -299,6 +401,9 @@ pub(crate) struct InjectArgs {
     /// 注入到所有 frame
     #[arg(long = "all-frames")]
     pub(crate) all_frames: bool,
+    /// 跳过本地 JS 语法预检，直接交给浏览器执行
+    #[arg(long = "no-preflight")]
+    pub(crate) no_preflight: bool,
     #[arg(long)]
     pub(crate) tab: Option<String>,
     #[arg(long)]

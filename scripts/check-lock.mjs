@@ -10,10 +10,10 @@
 //   1. Cargo.lock 存在；其中 `name = "atb"` 的 version == Cargo.toml [package].version
 //   2. Cargo.lock 里 atb 的 dependencies 集合 == Cargo.toml [dependencies] 的键集合
 //      （`[target.'cfg(...)'.dependencies]` 与 `[features]` 不参与集合比较）
-//   3. Cargo.lock 里每个直接依赖的版本满足 Cargo.toml 里的版本要求
+// 3. Cargo.lock 里每个直接依赖的版本满足 Cargo.toml 里的版本要求
 //   4. package-lock.json 的根版本 == package.json
 //   5. package-lock.json 的 5 个平台包条目：version / os / cpu / resolved / integrity
-//      与 scripts/platforms.json + 当前版本一致
+// 与 scripts/platforms.json + 当前版本一致
 //
 // 两种模式：
 //   默认       日常开发/CI：平台包 integrity 允许「刚 bump、还没重新 npm install」的

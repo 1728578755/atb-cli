@@ -64,6 +64,8 @@
   --gap-row: 10px;
   --gap-block: 12px;
   --control-h: 30px;
+  /* 键值表左列固定宽度：每行是独立 grid，auto 会让各行的 dt 宽度不一致。 */
+  --kv-label-w: 84px;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --dur: 140ms;
 }

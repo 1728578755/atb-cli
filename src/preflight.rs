@@ -300,6 +300,39 @@ fn check_brackets(text: &str, label: &str, pairs: &[(char, char)]) -> Result<(),
     Ok(())
 }
 
+/// 本地 JS 配平检查档位（`ATB_JS_CHECK`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsCheckPolicy {
+    /// 默认：判为不配平时直接 exit 2。
+    Strict,
+    /// 跳过检查，但 CLI 在 stderr 提示一次；脚本交给浏览器实际执行。
+    Warn,
+    /// 完全跳过本地检查（与 `--no-preflight` 等价）。
+    Off,
+}
+
+/// 读取 `ATB_JS_CHECK` 并映射成档位；非法值由 `settings::js_check()` 回落到 strict。
+pub fn js_check_policy() -> JsCheckPolicy {
+    match crate::settings::js_check().as_str() {
+        "off" => JsCheckPolicy::Off,
+        "warn" => JsCheckPolicy::Warn,
+        _ => JsCheckPolicy::Strict,
+    }
+}
+
+/// 这个 payload 是否应跳过本地 JS 配平检查。
+///
+/// 两个来源：显式 `no_preflight`（`exec --no-preflight` / `inject --no-preflight`），
+/// 或全局档位 `ATB_JS_CHECK=warn|off`。只影响 JS 配平检查，选择器/路径/数值预检
+/// 仍然照常执行。
+pub fn js_check_skipped(payload: &Value) -> bool {
+    payload
+        .get("no_preflight")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || js_check_policy() != JsCheckPolicy::Strict
+}
+
 /// JS 预检：括号配平 + 字符串/注释跳过。
 ///
 /// 不追求完整语法分析，只覆盖「少一个大括号」「字符串里的引号没配对」这类
@@ -332,6 +365,11 @@ pub fn validate_js(code: &str) -> Result<(), Problem> {
     let mut mode = Mode::Normal;
     let mut escaped = false;
     let mut index = 0usize;
+    // 未闭合字面量的起始位置：EOF 时的错误必须指回「从哪开始」，只报文件末尾
+    // 对排查长脚本没有帮助。
+    let mut block_comment_start: Option<usize> = None;
+    let mut string_start: Option<(usize, char)> = None;
+    let mut template_start: Option<usize> = None;
     // 模板字符串里的 ${...} 需要回到 Normal 解析表达式，用栈记录模板深度。
     let mut template_expr_depth: Vec<usize> = Vec::new();
     // `/` 是正则开头还是除号，取决于前一个有效 token 是不是「操作数」：
@@ -442,6 +480,7 @@ pub fn validate_js(code: &str) -> Result<(), Problem> {
                     index += 1;
                 } else if ch == '/' && next == Some('*') {
                     mode = Mode::BlockComment;
+                    block_comment_start = Some(index);
                     index += 1;
                 } else if ch == '/' {
                     if expect_operand {
@@ -465,10 +504,13 @@ pub fn validate_js(code: &str) -> Result<(), Problem> {
                     }
                 } else if ch == '"' {
                     mode = Mode::Double;
+                    string_start = Some((index, ch));
                 } else if ch == '\'' {
                     mode = Mode::Single;
+                    string_start = Some((index, ch));
                 } else if ch == '`' {
                     mode = Mode::Template;
+                    template_start = Some(index);
                 } else if ch == '{' || ch == '(' || ch == '[' {
                     stack.push((ch, index));
                     expect_operand = true;
@@ -583,32 +625,50 @@ pub fn validate_js(code: &str) -> Result<(), Problem> {
 
     match mode {
         Mode::BlockComment => {
+            let position = block_comment_start
+                .map(|start| {
+                    let (line, column) = line_col_from_chars(&chars, start);
+                    format!("第 {line} 行第 {column} 列开始的")
+                })
+                .unwrap_or_default();
             return Err(Problem::new(
                 "invalid_js",
-                "块注释 /* 没有闭合",
+                format!("{position}块注释 /* 没有闭合"),
                 "补上 */，或改成 // 行注释",
             )
             .with_field("script"));
         }
         Mode::Single | Mode::Double => {
+            let position = string_start
+                .map(|(start, quote)| {
+                    let (line, column) = line_col_from_chars(&chars, start);
+                    format!("第 {line} 行第 {column} 列的 {quote:?} 字符串没有闭合")
+                })
+                .unwrap_or_else(|| "字符串结尾的引号没有闭合".to_string());
             return Err(Problem::new(
                 "invalid_js",
-                "字符串结尾的引号没有闭合",
+                position,
                 "检查引号是否成对；shell 单引号里不能直接写单引号，可改用双引号包裹",
             )
             .with_example("atb exec \"return document.title\"")
             .with_field("script"));
         }
         Mode::Template => {
+            let position = template_start
+                .map(|start| {
+                    let (line, column) = line_col_from_chars(&chars, start);
+                    format!("第 {line} 行第 {column} 列开始的模板字符串 ` 没有闭合")
+                })
+                .unwrap_or_else(|| "模板字符串 ` 没有闭合".to_string());
             return Err(
-                Problem::new("invalid_js", "模板字符串 ` 没有闭合", "补上结尾的反引号")
-                    .with_field("script"),
+                Problem::new("invalid_js", position, "补上结尾的反引号").with_field("script")
             );
         }
         Mode::Regex => {
+            let (line, column) = line_col_from_chars(&chars, regex_start);
             return Err(Problem::new(
                 "invalid_js",
-                "正则字面量没有闭合（缺结尾的 `/`）",
+                format!("第 {line} 行第 {column} 列开始的正则字面量没有闭合（缺结尾的 `/`）"),
                 "补上结尾的 `/`；如果本意是除号，检查运算符左边是不是写成了不完整的表达式",
             )
             .with_field("script"));
@@ -638,9 +698,9 @@ pub fn validate_js(code: &str) -> Result<(), Problem> {
 /// `(` / `{`。也就是「这里能不能是一个完整的正则字面量」。
 ///
 /// 正则字面量不能跨行，所以「同一行没有结尾 `/`」就说明这里更可能是除号
-/// （`(a+b) / 2`）。扫描时跳过字符类 `[...]` 和转义字符。
+// （`(a+b) / 2`）。扫描时跳过字符类 `[...]` 和转义字符。
 ///
-/// 括号深度是 的收紧：`count(a) / (total / 100)` 里，`)` 后第一个 `/`
+// 括号深度是 的收紧：`count(a) / (total / 100)` 里，`)` 后第一个 `/`
 /// 后面紧跟着未闭合的 `(`，里面的 `/` 不是正则的结尾而是除号；旧实现把它当正则
 /// 起始，最终报「多了一个 `)`」。`{` 同理（`{a:1} / {b:2}`）。字符类里的括号
 /// 不参与深度（`/[(]/` 仍然能正确识别为正则）。
@@ -858,6 +918,23 @@ mod tests {
         assert_eq!(err.code, "invalid_js");
         assert!(err.message.contains("缺一个"));
         assert!(err.message.contains("第 1 行"));
+    }
+
+    #[test]
+    fn unclosed_literals_report_start_position() {
+        // EOF 类错误必须指回字面量开始处，而不是只给一句没有位置的文案。
+        let comment = validate_js("const a = 1;\n/* still open").unwrap_err();
+        assert!(comment.message.contains("第 2 行"), "{}", comment.message);
+
+        let string = validate_js("const a = 1;\nconst b = 'open").unwrap_err();
+        assert!(string.message.contains("第 2 行"), "{}", string.message);
+        assert!(string.message.contains("第 11 列"), "{}", string.message);
+
+        let template = validate_js("const a = 1;\nconst b = `open").unwrap_err();
+        assert!(template.message.contains("第 2 行"), "{}", template.message);
+
+        let regex = validate_js("const a = 1;\nconst r = /open").unwrap_err();
+        assert!(regex.message.contains("第 2 行"), "{}", regex.message);
     }
 
     #[test]
@@ -1122,7 +1199,11 @@ pub fn preflight_payload(op: &str, payload: &Value) -> Result<(), Problem> {
                     if let Some(problem) = non_internal_extension_json(script) {
                         return Err(problem);
                     }
-                    validate_js(script)?;
+                    // `--no-preflight` / `ATB_JS_CHECK=warn|off` 只跳过配平检查；
+                    // 上面的扩展控制帧判定仍然生效（那是语义安全，不是语法预检）。
+                    if !js_check_skipped(payload) {
+                        validate_js(script)?;
+                    }
                 }
             }
         }
@@ -1133,7 +1214,16 @@ pub fn preflight_payload(op: &str, payload: &Value) -> Result<(), Problem> {
                 .unwrap_or("run");
             if action == "run" || action == "persist" {
                 if let Some(code) = payload.get("code").and_then(Value::as_str) {
-                    validate_js(code)?;
+                    if !js_check_skipped(payload) {
+                        validate_js(code)?;
+                    }
+                }
+                // `--cleanup-file` 的脚本同样会在页面里执行；语法错误应在本地暴露，
+                // 不要等注入成功后清理阶段才抛 SyntaxError。
+                if let Some(code) = payload.get("cleanup_code").and_then(Value::as_str) {
+                    if !js_check_skipped(payload) {
+                        validate_js(code)?;
+                    }
                 }
             }
         }
@@ -1212,6 +1302,47 @@ mod payload_tests {
         let payload = json!({ "script": "if (a) { return 1" });
         assert_eq!(
             preflight_payload("exec", &payload).unwrap_err().code,
+            "invalid_js"
+        );
+    }
+
+    #[test]
+    fn exec_payload_no_preflight_skips_balance_check() {
+        // 逃生口只跳过 JS 配平检查，数值字段等其它预检仍然生效。
+        let payload = json!({ "script": "if (a) { return 1", "no_preflight": true });
+        assert!(preflight_payload("exec", &payload).is_ok());
+        assert!(js_check_skipped(&payload));
+
+        let bad_number = json!({
+            "script": "if (a) { return 1",
+            "no_preflight": true,
+            "timeout": 1e300
+        });
+        assert_eq!(
+            preflight_payload("exec", &bad_number).unwrap_err().code,
+            "invalid_number"
+        );
+    }
+
+    #[test]
+    fn inject_payload_no_preflight_skips_balance_check() {
+        let payload = json!({
+            "action": "run",
+            "code": "if (a) { return 1",
+            "no_preflight": true
+        });
+        assert!(preflight_payload("inject", &payload).is_ok());
+    }
+
+    #[test]
+    fn inject_payload_checks_cleanup_code() {
+        let payload = json!({
+            "action": "persist",
+            "code": "return 1",
+            "cleanup_code": "if (a) {"
+        });
+        assert_eq!(
+            preflight_payload("inject", &payload).unwrap_err().code,
             "invalid_js"
         );
     }

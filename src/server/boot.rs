@@ -181,6 +181,10 @@ pub(crate) fn build_api_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/reload-trust", post(reload_trust))
         .route("/tabs", get(tabs))
+        // 2026-11-13：目标身份与前台切换。
+        .route("/focus", post(focus))
+        .route("/use", post(use_target))
+        .route("/extensions", post(extensions))
         .route("/tabtree", get(tabtree))
         .route("/lookup/tab/:tab_id", get(lookup_tab))
         .route("/lookup/browser/:browser_id", get(lookup_browser))
@@ -249,13 +253,20 @@ pub(crate) fn build_api_router(state: AppState) -> Router {
             require_api_access,
         ))
         // 最外层：401/403 也算「在途」（请求离开时计数一定归零），
-        // 但只有非鉴权失败才续期 `last_activity`（见 `track_inflight`）。
+        // 但只有非鉴权失败才续期 `last_activity`。
         .layer(middleware::from_fn_with_state(
             state.clone(),
             track_inflight,
         ));
     public
         .merge(protected)
+        // 2026-11-13：把 `select_tab` 解析到的目标身份并入响应（resolved_target /
+        // browser / profile / warnings）。它必须包在业务路由外层，才能看到
+        // `select_tab` 在 handler 内写入的 task-local。
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            enrich_target_info,
+        ))
         // 带 State 的版本：身份头只有在请求**同时**持有有效 API token 时才被承认
         // （旧报告 #6），所以这里必须能拿到 `state.api_token`。
         .layer(middleware::from_fn_with_state(state.clone(), agent_context))
@@ -264,7 +275,7 @@ pub(crate) fn build_api_router(state: AppState) -> Router {
 
 /// `x-agent-browser-agent` 的合法形态：1..=80 个 `[A-Za-z0-9._:-]`。
 ///
-/// 与 CLI 侧清洗规则一致（另一半在 CLI）。**不合法不是"清洗"而是忽略**：
+// 与 CLI 侧清洗规则一致。**不合法不是"清洗"而是忽略**：
 /// 清洗会把 `客服`、`运维` 都塌缩成空串再落到 `default`，两个不同智能体共享
 /// 同一个默认标签页，`cleanup` 互相关对方页面，且看起来一切正常。
 pub(crate) fn is_valid_agent_id(value: &str) -> bool {
@@ -342,9 +353,9 @@ pub(crate) struct InflightGuard {
 
 impl InflightGuard {
     /// 计数 +1 与守卫创建必须是同一步：若先递增、再 `.await` 取锁，请求在取锁期间
-    /// 被取消，就只留下「计数 +1、守卫从未创建」的泄漏，daemon 再也不会空闲退出。
+    // 被取消，就只留下「计数 +1、守卫从未创建」的泄漏，daemon 再也不会空闲退出。
     ///
-    /// 旧实现只在「0→1」那一刻记录起点，于是 (a) 这条请求离场后
+    /// A-02 / S1-03：旧实现只在「0→1」那一刻记录起点，于是 (a) 这条请求离场后
     /// 时间戳仍滞留，下一条长请求会在 `since` 已经很旧时被提前判死；(b) 0→1 之后、
     /// 写入起点之前还有个 await 窗口，期间 monitor 看到的是上一条请求留下的旧值。
     /// 现在起点改成「**每条**请求进入时由 `track_inflight` 刷新」，acquire 不再承担
@@ -377,14 +388,14 @@ pub(crate) async fn track_inflight(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // 起点语义固定为「最近一次有请求进来的时刻」，**每条**请求都刷新，
+    // A-02 / S1-03：起点语义固定为「最近一次有请求进来的时刻」，**每条**请求都刷新，
     // 不再只在 0→1 时写。由此：
     // - 多条持续重叠的健康请求会不断续期，不会因为「最早那条请求的陈旧时间戳」
-    // 在卡死阈值后被误杀；
+    //   在卡死阈值后被误杀（A-02）；
     // - 反过来「`inflight > 0` 且这个时刻已经超过阈值」就意味着阈值时间内
     //   一条新请求都没进来——这才是真的挂了。
     //
-    // 顺序很关键：**先刷新起点、再入计数**。写起点要 await 拿锁，若放在
+    // 顺序很关键：**先刷新起点、再入计数**（S1-03）。写起点要 await 拿锁，若放在
     // 「计数 +1」之后，请求恰好在这段 await 里被取消，就会留下「计数说在途、起点却还是
     // 上一条请求」的窗口——monitor 拿旧时间戳一算就把它判成卡死。放在计数之前，
     // 被取消时只是白刷新一次时间戳（这条请求没计入 inflight，monitor 不会看它），
@@ -461,7 +472,7 @@ pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
 /// 顺序有讲究：前两项是「这条请求是不是发给本机 daemon 的」，最后一项才是身份。
 /// 任意一项失败都返回结构化 `(status, error_code, message)`，由调用方拼 JSON。
 ///
-/// 只校验 `Origin` 挡不住 **DNS rebinding**——攻击者把 `evil.example` 解析到
+// 只校验 `Origin` 挡不住 **DNS rebinding**——攻击者把 `evil.example` 解析到
 /// 127.0.0.1 后，浏览器发出的 `Host` 就是攻击者域名（`Origin` 也会带，但 Host 是
 /// 更底层的判据，且 `Origin` 可能缺失）。现在 `Host` 的**主机名**必须是
 /// `127.0.0.1` / `localhost` / `[::1]` / `::1`（大小写不敏感）；带端口时只校验
@@ -514,7 +525,7 @@ pub(crate) fn validate_api_access(
     Ok(())
 }
 
-/// `Host` 主机名是否属于回环。
+// `Host` 主机名是否属于回环。
 ///
 /// 只比主机名：`127.0.0.1:18767`、`localhost`、`[::1]:18767`、`::1` 都通过；
 /// `evil.example`（DNS rebinding 的典型形态）、`127.0.0.1:abc` 一律拒绝。
@@ -557,7 +568,7 @@ fn split_host_port(value: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// 缺少 `Host` 时只提示一次（放行分支）。
+// 缺少 `Host` 时只提示一次。
 fn warn_missing_host() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
@@ -588,7 +599,7 @@ pub(crate) fn idle_shutdown_ttl_from_env() -> Duration {
         .unwrap_or(IDLE_SHUTDOWN_TTL)
 }
 
-/// 在途请求「卡死」判定的下限。
+/// 在途请求「卡死」判定的下限（N3-07 / A-02）。
 ///
 /// `inflight > 0` 会阻止空闲自杀，这本身是对的（否则长命令被腰斩）；但如果某个请求
 /// 永远挂着（`download-wait --timeout 3600` 遇上扩展失联），daemon 就再也不会退出，
@@ -596,7 +607,7 @@ pub(crate) fn idle_shutdown_ttl_from_env() -> Duration {
 ///
 /// 取 3900s：单条请求的超时硬上限是 `preflight::TIMEOUT_MAX_SECONDS`（3600s），
 /// 再加 300s 收尾余量。低于它会把合法的 `download-wait --timeout 3600` 跑到一半就
-/// 误杀；旧值 1800s 比单条请求允许的最长耗时还短，
+/// 误杀（A-02）；旧值 1800s 比单条请求允许的最长耗时还短，
 /// 那条「不误杀」的保证根本立不住。
 ///
 /// 真正的卡死判定并不只看这个下限：起点在**每条**请求进入时刷新（见 `track_inflight`），
@@ -615,14 +626,14 @@ pub(crate) fn max_inflight_stall(state: &AppState) -> Duration {
         .max(MAX_INFLIGHT_STALL)
 }
 
-/// 扩展断开后的宽限期。
+// 扩展断开后的宽限期。
 ///
 /// 扩展重连靠 chrome.alarms，其硬下限 30s（Chrome 120+ 会抬到 ≥30s），
 /// 所以"扩展一断就按空闲计时"等于"一断就自退"。给它一个明显大于 alarms
 /// 周期的窗口，短暂断线仍能自愈。
 pub(crate) const EXTENSION_RECONNECT_GRACE: Duration = Duration::from_secs(60);
 
-/// 空闲监控的「单轮结论」。
+// 空闲监控的「单轮结论」。
 ///
 /// 判定从循环体里抽出来，单测才能直接驱动**生产代码**跑一轮（构造 `AppState`
 /// 就够了），不必等 5s 定时器、也不必等到 300s TTL。
@@ -632,19 +643,19 @@ pub(crate) enum IdleAction {
     Exit,
 }
 
-/// 跑一轮空闲判定。`disconnected_since` 由调用方持有，跨轮保存。
+// 跑一轮空闲判定。`disconnected_since` 由调用方持有，跨轮保存。
 ///
 /// 顺序即优先级：
 /// 1. 在途请求（`inflight > 0`）默认阻止退出——否则长命令被腰斩；但卡死超阈值要放行，
 ///    否则 `download-wait --timeout 3600` 遇上扩展失联会让 daemon 永不退出；
-/// 2. running job 同理（对称的保护）；
+// 2. running job 同理；
 /// 3. 真正空闲（`idle_for >= ttl`）时，只要还有扩展连着就不退（重连代价更大）；
 /// 4. 扩展刚断开时先等一个宽限窗口，别把短暂断线当成「没有浏览器」。
 pub(crate) async fn idle_tick(
     state: &AppState,
     disconnected_since: &mut Option<Instant>,
 ) -> IdleAction {
-    // 这里的 `since` 是「最近一次有请求进来的时刻」：持续重叠的健康请求会
+    // 这里的 `since` 是「最近一次有请求进来的时刻」（A-02）：持续重叠的健康请求会
     // 一直把它刷新到现在，所以不会被「最早那条请求的陈旧时间戳」误杀。
     if state.inflight.load(Ordering::Relaxed) > 0 {
         let since = *state.inflight_since.lock().await;
@@ -740,7 +751,7 @@ pub(crate) async fn monitor_idle_shutdown(state: AppState) {
 /// 用 `started_at.unwrap_or(created_at)`：job 从提交到真正开跑之间 status 已经是
 /// Running，但 started_at 还没写，此时按 created_at 计不会把它误判成刚启动。
 ///
-/// **不能用 `secs`**。`secs` 走的是 `preflight::clamp_timeout_seconds`，
+// **不能用 `secs()`**。`secs()` 走的是 `preflight::clamp_timeout_seconds`，
 /// 那是给「命令超时参数」用的护栏，上限 3600s；在这里它会把已运行时长**钳到 3600s**，
 /// 而卡死阈值 `max_inflight_stall` 是 ≥3900s，于是 `stalled_for >= stall_limit`
 /// 永远不成立——job 卡死分支形同虚设，daemon 永不退出。
@@ -765,7 +776,7 @@ pub(crate) async fn running_jobs_snapshot(state: &AppState) -> (usize, Option<Du
 mod tests {
     use super::*;
 
-    /// 主机名必须是回环；端口只校验语法；缺 Host 放行。
+    // 主机名必须是回环；端口只校验语法；缺 Host 放行。
     #[test]
     fn host_header_must_resolve_to_loopback() {
         for ok in [

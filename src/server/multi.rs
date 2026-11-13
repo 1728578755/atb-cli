@@ -1,5 +1,13 @@
 use super::*;
 
+// 使用 `@N`（tabs 列表序号）时的固定提示。
+///
+/// `@1` 是「tabs 输出顺序的第 1 个」，不是「最近打开的标签」；浏览器里标签一多，
+/// 这个序号与用户的直觉几乎必然不一致。只在「目标数 > 1」或「标签总数很大」时
+/// 提示，避免每条 `--tab @1` 都刷一遍噪音。
+const INDEX_TARGET_WARNING: &str =
+    "--tab @N 是 tabs 列表的第 N 个，不是最近打开的标签；需要“刚打开的那个”请用 --tab @latest";
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct MultiRequest {
     pub(crate) op: String,
@@ -87,7 +95,7 @@ pub(crate) async fn multi_value(state: &AppState, req: MultiRequest) -> Value {
         }
     }
 
-    // 默认只解析本 agent 打开的标签（多智能体共用同一浏览器时不串线）；
+    // TA：默认只解析本 agent 打开的标签（多智能体共用同一浏览器时不串线）；
     // 只有显式 `scope:"all"`（或 ATB_MULTI_SCOPE=all）才跨 agent。
     let scope_all = match req.scope.as_deref() {
         Some("all") => true,
@@ -117,6 +125,22 @@ pub(crate) async fn multi_value(state: &AppState, req: MultiRequest) -> Value {
     let skipped_foreign = resolved.skipped_foreign;
     let targets = resolved.targets;
     let scope_label = if scope_all { "all" } else { "agent" };
+    // `@N` 语义提示。目标数 > 1 时序号必然是「一批里的第 N 个」，很容易
+    // 选错；标签总数超过阈值时单目标也一样容易选错（`tabs` 列表太长看不完）。
+    let index_target_warning = if matches!(&spec, TargetSpec::Index(_)) {
+        let total_tabs = state
+            .driver
+            .read()
+            .await
+            .sessions
+            .values()
+            .filter(|session| session.is_active())
+            .count();
+        (targets.len() > 1 || total_tabs > crate::settings::tabs_large_warning())
+            .then_some(INDEX_TARGET_WARNING)
+    } else {
+        None
+    };
 
     let plan: Vec<Value> = targets
         .iter()
@@ -133,7 +157,7 @@ pub(crate) async fn multi_value(state: &AppState, req: MultiRequest) -> Value {
         .collect();
 
     if req.dry_run {
-        return json!({
+        let mut payload = json!({
             "ok": true,
             "dry_run": true,
             "op": req.op,
@@ -143,6 +167,10 @@ pub(crate) async fn multi_value(state: &AppState, req: MultiRequest) -> Value {
             "count": targets.len(),
             "targets": plan,
         });
+        if let Some(warning) = index_target_warning {
+            payload["target_warning"] = json!(warning);
+        }
+        return payload;
     }
 
     let started = Instant::now();
@@ -220,7 +248,7 @@ pub(crate) async fn multi_value(state: &AppState, req: MultiRequest) -> Value {
             let outcome = run_job(&state, &op, args, Arc::new(AtomicBool::new(false))).await;
             if stop_on_error {
                 // `run_job` 的 Err 只是「一种失败」；`wait` 超时、页面脚本 ok:false 都会
-                // 以 Ok(ok:false) 回来（同族），旧实现只认 Err，于是这些失败
+                // 以 Ok(ok:false) 回来，旧实现只认 Err，于是这些失败
                 // 不会触发停止位，后续目标照常执行。
                 let failed = match &outcome {
                     Err(_) => true,
@@ -313,11 +341,11 @@ pub(crate) async fn multi_value(state: &AppState, req: MultiRequest) -> Value {
         }
     }
     let results: Vec<Value> = slots.into_iter().flatten().collect();
-    json!({
+    let mut payload = json!({
         "ok": failed == 0 && succeeded > 0,
         "op": req.op,
         "target": spec.describe(),
-        // 回显解析范围与「因归属被跳过」的数量。默认 agent 范围下
+        // TA：回显解析范围与「因归属被跳过」的数量。默认 agent 范围下
         // skipped_foreign>0 表示「还有别的智能体的标签没被操作」，不是失败。
         "scope": scope_label,
         "skipped_foreign": skipped_foreign,
@@ -327,7 +355,11 @@ pub(crate) async fn multi_value(state: &AppState, req: MultiRequest) -> Value {
         "concurrency": concurrency,
         "elapsed_ms": started.elapsed().as_millis() as u64,
         "results": results,
-    })
+    });
+    if let Some(warning) = index_target_warning {
+        payload["target_warning"] = json!(warning);
+    }
+    payload
 }
 
 /// 截图 / PDF 的输出路径支持 `{tab}` 与 `{index}` 占位符。

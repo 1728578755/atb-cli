@@ -65,6 +65,9 @@ pub(crate) struct ExecRequest {
     /// 在标签页的所有 frame 里执行。
     #[serde(default, alias = "allFrames")]
     pub(crate) all_frames: bool,
+    /// CLI 侧已跳过本地 JS 配平检查（daemon 不再重复检查，仅记录在响应里）。
+    #[serde(default, alias = "noPreflight")]
+    pub(crate) no_preflight: bool,
 }
 
 /// `/open` 请求体。
@@ -106,15 +109,15 @@ pub(crate) struct OpenRequest {
     /// 自动等待挑战的总超时（秒）。
     #[serde(default, alias = "challengeTimeout")]
     pub(crate) challenge_timeout: Option<f64>,
-    /// 打开后继续等待的页面条件：dom-quiet | selector:<CSS> | text:<文本>。
+    // 打开后继续等待的页面条件：dom-quiet | selector:<CSS> | text:<文本>。
     /// `networkidle` 仍接受，但实现是**近似**的「resource 计数 + DOM 稳定」采样，
-    /// 不是 CDP 在途请求计数。
+    // 不是 CDP 在途请求计数。
     #[serde(default, alias = "waitFor")]
     pub(crate) wait_for: Option<String>,
-    /// 打开前先 ping 一次扩展，唤醒 service worker。
+    // 打开前先 ping 一次扩展，唤醒 service worker。
     #[serde(default)]
     pub(crate) warm: bool,
-    /// `--wait-for` 的等待预算（秒）。CLI 已按它扩了 HTTP 预算，
+    // `--wait-for` 的等待预算（秒）。CLI 已按它扩了 HTTP 预算，
     /// 服务端必须用**同一个**字段，否则「服务端还在等、CLI 先断开」的旧问题依旧。
     /// 缺省时回落到 `readiness_timeout`（旧口径）。
     #[serde(default, alias = "waitForTimeout")]
@@ -280,6 +283,55 @@ pub(crate) struct ScreenshotRequest {
     /// 整页拼图的设备像素总高上限（CDP 不可用时的回落通道使用）。
     #[serde(default, alias = "maxHeightPx")]
     pub(crate) max_height_px: Option<u32>,
+    /// 截图前额外等待（毫秒）；None 时取 ATB_SCREENSHOT_SETTLE_MS。
+    #[serde(default, alias = "settleMs")]
+    pub(crate) settle_ms: Option<u64>,
+    /// 截图前先等该选择器出现（支持 `host >>> inner`）。
+    #[serde(default, alias = "waitSelector")]
+    pub(crate) wait_selector: Option<String>,
+    /// 截图前等到在途请求归零并静默；值是静默窗口毫秒，0/缺省用配置默认。
+    #[serde(default, alias = "networkIdle")]
+    pub(crate) network_idle: Option<u64>,
+    /// CDP 不可用时直接失败，不回落 captureVisibleTab。
+    #[serde(default, alias = "requireCdp")]
+    pub(crate) require_cdp: bool,
+    #[serde(default = "default_high_level_timeout")]
+    pub(crate) timeout: f64,
+}
+
+/// `atb focus`：把目标标签页切到前台。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FocusRequest {
+    #[serde(alias = "switchTabId")]
+    pub(crate) switch_tab_id: Option<String>,
+    pub(crate) browser: Option<String>,
+    pub(crate) profile: Option<String>,
+    /// true 时不把浏览器窗口抢到系统前台（只切标签页）。
+    #[serde(default, alias = "noWindow")]
+    pub(crate) no_window: bool,
+    #[serde(default = "default_high_level_timeout")]
+    pub(crate) timeout: f64,
+}
+
+/// `atb use`：把当前 agent 的默认目标固定到指定标签页。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UseRequest {
+    /// 目标规格（tab_id / @N / url: / title: / @latest）。
+    pub(crate) target: String,
+    pub(crate) browser: Option<String>,
+    pub(crate) profile: Option<String>,
+}
+
+/// `atb extensions`：列出已安装扩展（需要用户授权 management 权限）。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtensionsRequest {
+    pub(crate) browser: Option<String>,
+    pub(crate) profile: Option<String>,
+    #[serde(default, alias = "includeDisabled")]
+    pub(crate) include_disabled: bool,
     #[serde(default = "default_high_level_timeout")]
     pub(crate) timeout: f64,
 }
@@ -318,8 +370,35 @@ pub(crate) struct TabsQuery {
     pub(crate) browser: Option<String>,
     pub(crate) profile: Option<String>,
     /// 输出完整 URL（默认截断到 80 字符以节省 token）。
-    #[serde(default)]
+    ///
+    /// `TabsQueryExt` 用 `#[serde(flatten)]` 组合本结构：serde_urlencoded 在
+    /// flatten 路径上把所有值先缓冲成字符串，bool 直接反序列化会得到
+    /// `invalid type: string "true", expected a boolean`（HTTP 400）。
+    /// 自定义反序列化同时接受 true/false、"true"/"false"、1/0。
+    #[serde(default, deserialize_with = "de_boolish")]
     pub(crate) full: bool,
+}
+
+/// 查询串里的布尔值：serde_urlencoded + flatten 只会给字符串，这里统一兼容。
+pub(crate) fn de_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Boolish {
+        Bool(bool),
+        Int(i64),
+        Text(String),
+    }
+    Ok(match Boolish::deserialize(deserializer)? {
+        Boolish::Bool(value) => value,
+        Boolish::Int(value) => value != 0,
+        Boolish::Text(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+    })
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -619,6 +698,12 @@ pub(crate) struct WaitRequest {
     pub(crate) profile: Option<String>,
     #[serde(alias = "frameId")]
     pub(crate) frame_id: Option<i64>,
+    /// 等 DOM 连续静默；值是静默窗口毫秒，0/缺省用 ATB_WAIT_DOM_STABLE_MS。
+    #[serde(default, alias = "domStable")]
+    pub(crate) dom_stable: Option<u64>,
+    /// 等页面在途请求归零并静默；值同上。
+    #[serde(default, alias = "networkIdle")]
+    pub(crate) network_idle: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -639,6 +724,24 @@ pub(crate) struct InjectRequest {
     pub(crate) switch_tab_id: Option<String>,
     pub(crate) browser: Option<String>,
     pub(crate) profile: Option<String>,
+    /// 持久注入寿命（秒）；None 时用 ATB_INJECT_PERSIST_DEFAULT_TTL_SEC。
+    #[serde(alias = "ttlSec")]
+    pub(crate) ttl_sec: Option<u64>,
+    /// 持久注入永不过期（CLI 已要求显式确认）。
+    #[serde(default, alias = "persistForever")]
+    pub(crate) persist_forever: bool,
+    /// 按油猴脚本环境包装：注入 GM shim。
+    #[serde(default)]
+    pub(crate) userscript: bool,
+    /// GM_* 存储命名空间。
+    #[serde(default, alias = "gmNamespace")]
+    pub(crate) gm_namespace: Option<String>,
+    /// 注入前先删除匹配元素。
+    #[serde(default, alias = "cleanupSelectors")]
+    pub(crate) cleanup_selectors: Vec<String>,
+    /// 注入前执行的清理脚本。
+    #[serde(default, alias = "cleanupCode")]
+    pub(crate) cleanup_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

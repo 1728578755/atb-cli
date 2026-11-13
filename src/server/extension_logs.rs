@@ -92,9 +92,19 @@ pub(crate) fn humanize_extension_error(raw: &str) -> String {
             Ok(value) => value,
             Err(_) => break,
         };
+        // 扩展的脚本错误常是嵌套对象：`{"error":{"name":"SyntaxError",
+        // "message":"Unexpected token","stack":"..."},"newTabs":[]}`。
+        // 旧实现只认字符串形式，于是用户看到整段 JSON（含 eval 栈），
+        // 反而找不到真正原因。
         let inner = parsed
             .get("error")
             .and_then(Value::as_str)
+            .or_else(|| {
+                parsed
+                    .get("error")
+                    .and_then(Value::as_object)
+                    .and_then(|object| object.get("message").and_then(Value::as_str))
+            })
             .or_else(|| parsed.get("message").and_then(Value::as_str));
         match inner {
             Some(next) if next.trim() != text => text = next.trim().to_string(),
@@ -298,7 +308,21 @@ pub(crate) async fn console_start(
     }
     .await;
     Json(match result {
-        Ok(value) => json!({ "ok": true, "result": value, "max_entries": max_entries }),
+        Ok(value) => {
+            // 把「本次 start 之前是否已经在采集」显式提到顶层。扩展在
+            // idempotent 已运行时回 `already_running:true`，`console history`
+            // 据此决定采样后要不要 stop（不能把别人开的采集停掉）。
+            let already_running = value
+                .get("already_running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            json!({
+                "ok": true,
+                "result": value,
+                "max_entries": max_entries,
+                "already_running": already_running,
+            })
+        }
         Err(err) => json!({ "ok": false, "error": err.to_string(), "max_entries": max_entries }),
     })
 }
@@ -327,7 +351,22 @@ pub(crate) async fn console_list(
     .await;
     Json(match result {
         Ok(value) => {
-            let mut out = json!({ "ok": true, "result": value, "limit": limit });
+            // 扩展的 `consoleList` 回 `{status:"started"|"stopped", count, logs}`
+            // （没有 `active` 布尔）。这里补一个顶层的 `active`，让
+            // `console history` 不必解析扩展私有字段；不认识 status 时给 null
+            // （= 未知），调用方按「未知不擅自 stop」处理。
+            let active = value
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|status| status == "started");
+            let count = value.get("count").and_then(Value::as_u64).unwrap_or(0);
+            let mut out = json!({
+                "ok": true,
+                "result": value,
+                "limit": limit,
+                "active": active,
+                "count": count,
+            });
             if let Some(note) = clamped {
                 out["clamped"] = note;
             }

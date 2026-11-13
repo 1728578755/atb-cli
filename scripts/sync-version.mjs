@@ -160,12 +160,12 @@ function scanDocs(root, entries, target) {
       })
       .join('\n');
 
-    // 守卫空转是这一批缺陷的通病（同源）：一条都匹配不上时必须报错，
+    // 守卫空转是这一批缺陷的通病：一条都匹配不上时必须报错，
     // 不能让「文档改了措辞」静默变成「版本永远一致」。
     if (entryFound.length === 0) {
       problems.push(`${entry.file} 里没有任何可校验的版本串（规则失效，见 scripts/version-docs.json）`);
     }
-    // 单条规则 0 命中同样是失守。以前只打一行 stderr 注意、--check 仍 exit 0，
+    // ：单条规则 0 命中同样是失守。以前只打一行 stderr 注意、--check 仍 exit 0，
     // 规则可以从「半失效」烂到「全失效」才被拦住。
     for (let p = 0; p < patterns.length; p += 1) {
       if (hits[p] === 0) {
@@ -185,7 +185,7 @@ function scanDocs(root, entries, target) {
   return { problems, changes, found };
 }
 
-/// 兜底扫描：规则清单之外出现的任何 `x.y.z` 都必须有归属。
+// 兜底扫描：规则清单之外出现的任何 `x.y.z` 都必须有归属。
 ///
 /// 为什么规则清单不够：README / README_EN 的章节标题「### 0.7.2 / 扩展 5.4.2 的新增能力」
 /// 从来没有任何 pattern 覆盖，升版本后它会安静地停在旧号上——`--check` 全绿，用户看到两个版本。
@@ -251,9 +251,9 @@ function compareList(actual, expected) {
   return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
-/// package-lock 的一致性校验：npm ci 在 version 漂移时会直接 EUSAGE（v5）。
+// package-lock 的一致性校验：npm ci 在 version 漂移时会直接 EUSAGE。
 ///
-/// v6 只比版本号； 起连平台条目的 os/cpu/resolved 一起比——这几个字段错了
+// v6 P3 只比版本号； 起连平台条目的 os/cpu/resolved 一起比——这几个字段错了
 /// npm 会「安装成功」但把错误的架构装进来（或直接跳过该 optional 依赖），
 /// 用户要等到运行时 native binary not found 才发现。
 function checkLock(root, pkg, platforms, registry) {
@@ -337,10 +337,10 @@ function checkLock(root, pkg, platforms, registry) {
 }
 
 /// Cargo.lock 也要跟着 package.json 走：`cargo build --locked` 以 lock 为准，
-/// 漏改会让下游构建直接失败（v6）。
+// 漏改会让下游构建直接失败。
 ///
 /// `sourceLabel` 只影响报错措辞：写入前的自检比较的是「lock vs 当前 Cargo.toml」，
-/// 说成「≠ package.json」会把人引向错误的文件。
+// 说成「≠ package.json」会把人引向错误的文件。
 function checkCargoLock(cargoPath, packageName, version, sourceLabel = 'package.json') {
   const lockPath = join(dirname(cargoPath), 'Cargo.lock');
   if (!existsSync(lockPath)) {
@@ -399,7 +399,7 @@ function refreshCargoLock(cargoPath, packageName, version) {
 }
 
 // ---------------------------------------------------------------------------
-// 写入：optionalDependencies + package-lock.json（与版本同步同一套事务）
+// 写入：optionalDependencies + package-lock.json
 // ---------------------------------------------------------------------------
 
 /// 计算对齐后的 package.json / package-lock.json 文本；不落盘，由调用方统一提交/回滚。

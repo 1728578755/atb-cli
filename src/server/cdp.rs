@@ -365,7 +365,7 @@ pub(crate) struct RefLookup {
 /// 2. URL 未变 + CDP 引用 → 返回 backendNodeId
 /// 3. URL 变了（导航 / SPA 换页）→ 旧节点已失效，用 role+name 在当前页面重新定位
 ///
-/// 缓存写回受 generation/URL 校验保护（第 3 点，见
+// 缓存写回受 generation/URL 校验保护（第 3 点，见
 /// [`write_back_relocated_selector`]）：重定位要跨一次进程往返，期间可能有人重新
 /// snapshot 过，写回旧快照的 refs 会把新编号覆盖掉。
 pub(crate) async fn resolve_ref_lookup(
@@ -448,7 +448,7 @@ pub(crate) fn is_ref_ambiguous(err: &anyhow::Error) -> bool {
         .is_some_and(|typed| typed.code == "ref_ambiguous")
 }
 
-/// 把语义重定位的结果写回快照缓存 —— **只有还是同一份快照时**才写（第 3 点）。
+// 把语义重定位的结果写回快照缓存 —— **只有还是同一份快照时**才写。
 ///
 /// 重定位是一次跨进程往返（页面脚本最长等 timeout）。这期间用户可能又 snapshot 了
 /// 一次（generation +1，@e 重新编号），或者页面已经导航（url 变了）。此时写回会把

@@ -15,7 +15,7 @@ use clap::{Args, Parser, Subcommand};
 ///
 /// JS 缺省时用内置脚本取 `{title, url, text(正文前 9000 字)}`，
 /// 9000 字的上限是为了单行结果不撑爆 Agent 上下文。
-/// `String.prototype.slice` 按 code unit 截断，9000 处正好落在代理对
+// `String.prototype.slice` 按 UTF-16 code unit 截断，9000 处正好落在代理对
 /// 中间时会切出半个 emoji（JSON 里变成替换字符）。用扩展运算符按 code point 切。
 const DEFAULT_SCRAPE_SCRIPT: &str =
     "return {title:document.title,url:location.href,text:[...document.body.innerText].slice(0,9000).join('')}";
@@ -26,13 +26,13 @@ const RETRY_BACKOFF_SECS: [u64; 3] = [3, 5, 7];
 /// `--batch` / `--concurrency` 的合法上限。
 ///
 /// 0 会让 `chunks(0)` panic；过大的值等于让 daemon 一次性开出几百个标签页（浏览器
-/// 直接卡死）。两者都是调用方写错了参数，必须在本地以退出码 2 拒绝。
+// 直接卡死）。两者都是调用方写错了参数，必须在本地以退出码 2 拒绝。
 pub(crate) const MAX_PARALLEL: usize = 32;
 
 /// 读 URL 列表：`--urls` 是存在的文件就按行读（行内支持逗号分隔），
 /// 否则按逗号分隔的列表解析；统一去重保序，空项丢弃。
 ///
-/// 不存在的文件路径以前会被静默当成「逗号分隔的 URL 列表」，于是一个
+// 不存在的文件路径以前会被静默当成「逗号分隔的 URL 列表」，于是一个
 /// 拼错的 `urls.txt` 只会得到「没有解析到任何 URL」或更糟——把路径字符串当成
 /// 一个 URL 去打开。现在只要输入像路径（有扩展名或路径分隔符、且不含 scheme），
 /// `!is_file()` 就直接报 `file_not_found`（exit 2）。
@@ -80,7 +80,7 @@ fn read_url_list(raw: &str) -> Result<Vec<String>> {
 ///
 /// 三种来源都要认：结构化 `outcome_unknown:true`、`error_code:"outcome_unknown"`、
 /// daemon 侧以 `outcome_unknown:` 开头的错误文案（见 `server/action.rs`）。
-/// 未知结果**绝不能重试**：重放可能造成二次点击/输入。
+// 未知结果**绝不能重试**：重放可能造成二次点击/输入。
 fn is_outcome_unknown(value: &Value) -> bool {
     if value
         .get("outcome_unknown")
@@ -100,7 +100,7 @@ fn is_outcome_unknown(value: &Value) -> bool {
 }
 
 /// 本批已打开的标签页：任何退出路径（`?` 提前返回、panic 之外的早退）都要关掉，
-/// 否则 scrape 会给用户留一堆后台页。
+// 否则 scrape 会给用户留一堆后台页。
 struct OpenTabGuard {
     tabs: Vec<String>,
     timeout: f64,
@@ -122,7 +122,7 @@ impl OpenTabGuard {
 
     /// 关闭当前记录的所有标签页，返回失败数（已清空列表，不会重复关）。
     ///
-    /// 用 `mem::take` 把 id 列表整体取走再逐条关——这样无论主流程显式调用
+    // 用 `mem::take` 把 id 列表整体取走再逐条关——这样无论主流程显式调用
     /// 还是 panic 时 `Drop` 兜底调用，都不会对同一批 id 二次 `/close`。
     fn close_all(&mut self) -> usize {
         let tabs = std::mem::take(&mut self.tabs);
@@ -286,7 +286,7 @@ fn exec_batch(
 // （三层嵌套元组写在签名里确实难读）。
 type OpenedTab = (String, String);
 
-/// 把 `/open` 回包里的一个条目映射回**请求 URL**。
+// 把 `/open` 回包里的一个条目映射回**请求 URL**。
 ///
 /// 回包里的 `url` 是**实际页面 URL**（重定向后），与 `--urls` 的请求串不同。
 /// 以前优先拿它当匹配键，`https://example.com` 被重定向到 `https://example.com/`
@@ -327,7 +327,7 @@ fn requested_url_for(item: &Value, actual: &str, requested: &[String]) -> Option
     None
 }
 
-/// 解析一批 `/open` 回包。返回（只列真实存在的 3 个返回值；整批未知由
+// 解析一批 `/open` 回包。返回（：只列真实存在的 3 个返回值；整批未知由
 /// 调用处用 `is_outcome_unknown(response)` 判定，不属于本函数）：
 /// - `opened`：打开成功、可以执行脚本的标签页（键是**请求 URL**）；
 /// - `failed`：打开失败但**可重试**的请求 URL → 错误文案；
@@ -381,7 +381,7 @@ fn opened_tabs(
     (opened, failed, unknown)
 }
 
-/// 打开 scrape 输出文件，按 `ATB_IO_OVERWRITE` 策略处理已存在文件。
+// 打开 scrape 输出文件，按 `ATB_IO_OVERWRITE` 策略处理已存在文件。
 ///
 /// 旧实现 `File::create` 无条件截断：`--urls` 写错一次就把上次的抓取结果清空，
 /// 且没有任何确认/备份。现在：

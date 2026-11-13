@@ -105,10 +105,10 @@ pub(crate) async fn snapshot_page(state: &AppState, req: SnapshotRequest) -> Res
     )
     .await?;
     let timeout = secs(req.timeout.max(0.1));
-    // 不再 `select_tab → active_tabs（全表收集）→ find`。目标已经在上面
+    // TA：不再 `select_tab → active_tabs（全表收集）→ find`。目标已经在上面
     // 选定，这里直接按 key 取，少一次全量快照、也少一个「选中后列表又变了」的窗口。
     let tab = active_tab_by_key(state, &tab_id).await?;
-    // AX 树与 `location.href` 在**同一次**往返里取回。旧实现用
+    // TA：AX 树与 `location.href` 在**同一次**往返里取回。旧实现用
     // `active_tabs` 里的 `session.info.url`（driver 侧快照，可能是上一次 tabs 推送的
     // 旧值）作为 `SnapshotCache.url`，于是同一份 AX 树配了一个滞后 URL：
     // 页面导航后 `@e` 校验会认为 URL 没变（或变了），误判成 ref_expired / 不该重定位。
@@ -183,7 +183,7 @@ pub(crate) async fn snapshot_page(state: &AppState, req: SnapshotRequest) -> Res
     // returned 与 JS 路径同口径：树里实际带 ref 的节点数（fold_tree 之后）。
     let returned = count_tree_refs(&tree);
     let tree_truncated = returned < window_refs;
-    // 优先用同一次往返里读到的实时 `location.href`；只有它拿不到
+    // TA：优先用同一次往返里读到的实时 `location.href`；只有它拿不到
     // （旧扩展 / Runtime.evaluate 被页面策略拒绝）才回落到 driver 会话里的 URL，
     // 并用 `url_source` 如实标注取的是哪一种，下游 `@e` 校验可按来源决定是否重定位。
     let live_url_present = live_url.is_some();
@@ -193,7 +193,7 @@ pub(crate) async fn snapshot_page(state: &AppState, req: SnapshotRequest) -> Res
     };
     {
         let mut driver = state.driver.write().await;
-        // × 联动：把同一次往返读到的**实时** URL 回写会话。
+        // TA × 联动：把同一次往返读到的**实时** URL 回写会话。
         //
         // `write_back_relocated_selector`（cdp.rs）在用 `session.info.url` 与快照缓存的
         // `expected_url` 做实时比对：只把 live URL 写进 `SnapshotCache` 而不回写
@@ -249,7 +249,7 @@ pub(crate) async fn snapshot_page(state: &AppState, req: SnapshotRequest) -> Res
         // （`ref_scheme=all-named`）。两个引擎的 `@e5` 不保证指向同一元素，
         // 跨引擎复用引用前必须重新 snapshot。显式回传口径，调用方才有可能判断。
         "ref_scheme": "operable-only",
-        // `url` 与 `SnapshotCache.url` 同源（优先实时 location.href），
+        // TA：`url` 与 `SnapshotCache.url` 同源（优先实时 location.href），
         // `url_source` 标明来源（live = 本次页面实时读取；driver = 回落到会话快照）。
         "url": snapshot_url,
         "url_source": url_source,
@@ -361,7 +361,7 @@ pub(crate) async fn page_op_via_extension(
     };
     // wait 的「未命中」是正常结果（ok:false + matched:false），不能当成命令失败。
     // 判据必须是「带 matched 字段」而不是「op == wait」：challenge 的
-    // `action=wait`（现在回 ok:false + cleared:false + matched:false）也走这条
+    // `action=wait`也走这条
     // 通道，只有无 matched 的 ok:false 才代表页面脚本/通道真的坏了。别收窄成按 op 判断，
     // 否则 challenge 超时会被误报成通道错误，daemon 侧就攒不出 first_blocking_at。
     let has_match_field = payload.get("matched").is_some();

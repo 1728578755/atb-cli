@@ -4,11 +4,11 @@
 
 ## 支持版本
 
-只有最新 minor 接受安全修复。当前线是 `0.7.x`，最新版 `0.7.4`。
+只有最新 minor 接受安全修复。当前线是 `0.8.x`，最新版 `0.8.0`。
 
-- 报告前先升级到最新 `0.7.x`，旧补丁版的问题可能在当前版已修复。
+- 报告前先升级到最新 `0.8.x`，旧补丁版的问题可能在当前版已修复。
 - `0.6.x` 及更早不再接受安全修复。
-- 扩展版本需与 CLI 配套（当前扩展 `5.4.2`，消息协议 `4`）。
+- 扩展版本需与 CLI 配套（当前扩展 `5.5.0`，消息协议 `4`）。
 
 ## 报告漏洞
 
@@ -41,6 +41,8 @@
 - `chrome.debugger`：attach 后能读写该标签页的网络与控制台。
 - `<all_urls>` 注入：内容脚本在所有帧运行。
 - 页面脚本执行：`exec` / `inject` 在页面上下文执行任意 JS。
+- `optional_permissions: ["management"]`：只用于 `atb extensions` 读取已安装扩展列表；默认未授予，授权入口在扩展设置页，命令只读（`chrome.management.getAll`），不启用/停用/卸载。
+- 用户脚本 GM 存储：`inject --userscript` 的 `GM_setValue` 写入页面自己的 `localStorage`（前缀 `__atb_gm__:<namespace>:`），同源页面脚本可读；不要把凭据放进去。
 - 下载落盘：`download` 把文件写进浏览器下载目录，文件名来自站点。
 
 ## 已知设计取舍
@@ -51,6 +53,8 @@
 | daemon 空闲退出 | 默认 300 秒无活动且无扩展连接时退出（`ATB_IDLE_TTL`）；扩展断开有 60 秒宽限 | 退出到下次启动之间，18765 可能被同机进程抢占 |
 | `debugger` 权限 | `snapshot` 默认、纯 CSS 的 `click`/`fill`、`mouse-click`、`send-keys`、`upload`、`network`/`console`、整页/元素截图、`save-pdf`、`net mock --engine cdp`、挑战求解/点击会 attach | 浏览器顶部出现调试横幅，页面可感知 |
 | `<all_urls>` 注入 | 内容脚本在所有站点与所有帧运行 | 页面可探测到本工具的信号面，用 `stealth audit` 量化 |
+| optional `management` | 默认未授予；用户必须到扩展设置页点击授权；`atb extensions` 只调用 `getAll` | 授权后 CLI 能读到本机已安装扩展的名称/版本/启用状态；不能启用、停用或卸载 |
+| 用户脚本 GM 存储 | `GM_*` 键值写入页面 `localStorage`（`__atb_gm__:<namespace>:`） | 同源页面脚本可读；不要把敏感数据放进 GM 存储，也不要在不可信页面注入来源不明的用户脚本 |
 | Cookie 可读 | 能读含 `httpOnly` 的 Cookie | 拿到 CLI 或扩展控制权即可导出登录态 |
 | 挑战自动交互 | `challenge` 会点击可交互组件并等待放行；失败时智能体用 `widget` + `click --at` 自行兜底，最后才转人工 | 站点不放行时超时失败；需要视觉/短信验证的仍要人 |
 
@@ -120,7 +124,9 @@ proof，扩展不会泄露任何标签数据。**没配 token 时** `auth_requir
 - 设 `ATB_NO_DEBUGGER=1`，彻底禁止 attach；需要 CDP 的命令会返回替代方案。
 - 用专用的 Chrome Profile，避免日常登录态与自动化任务混在一起。
 - 不要在不可信页面执行来源不明的脚本：`exec` / `inject` 拿到的代码会在页面里跑。
-- 检查 `~/.atb` 及其文件的权限，确认只有本人可读：目录 0700、`daemon.log` 0600、`api-token` / `ws-trust.json` 0600（Windows 走 ACL）。
+- `inject --userscript` 的 GM 存储落在页面 `localStorage`，同源脚本可读；不要把 token / 密码写进 `GM_setValue`。
+- `management` 只在需要 `atb extensions` 时授权；用完可在扩展设置页撤销，其它命令不依赖它。
+- 检查 `~/.atb` 及其文件的权限，确认只有本人可读：目录 0700、`daemon.log` 0600、`api-token` / `ws-trust.json` 0600（Windows 走 ACL）；`banner.json` 只含 agent、浏览器名与时间，删除即重置提示。
 - 扩展 popup 默认把 Cookie 值渲染成 `•••`，点「显示值」后 5 秒内需二次确认；「复制 cookies」写入剪贴板后 30 秒自动清除（`clipboardTtlSec` 可在 popup 里调到 30–300 秒）。共用机器上不要跳过这一步直接复制。
 - 幂等落盘保持默认 `redacted`；只有确实需要审计响应体时再用 `ATB_IDEMPOTENCY_PERSIST=full`，并把它当作「会写敏感数据」对待。
 
@@ -169,13 +175,15 @@ proof，扩展不会泄露任何标签数据。**没配 token 时** `auth_requir
 
 ## English summary
 
-Only the latest minor (`0.7.x`) receives security fixes; upgrade before reporting.
+Only the latest minor (`0.8.x`) receives security fixes; upgrade before reporting.
 
 Report privately through GitHub Security Advisories. If unavailable, open an issue that only says a private channel is needed, with no exploit details. We aim to reply within 3 business days and do not promise a fix SLA.
 
 The local user is trusted; other local processes and page content are not. Traffic between the CLI, daemon and extension stays on `127.0.0.1`, using WebSocket 18765 (extension) and HTTP 18767 (CLI, `api-token`).
 
 Known trade-offs: `trust-extension` proves the peer only when a token is configured (`ws_hello` + HMAC); without a token the extension cannot verify the daemon. A port window remains after the extension disconnects and the daemon idles out. `chrome.debugger` attach, `<all_urls>` injection, readable cookies, and challenge handling that interacts with the widget, lets the agent click by coordinates as a fallback, and hands over to a human only when needed.
+
+The `management` permission is optional and only used by the read-only `atb extensions` command after the user grants it in extension settings. The GM shim used by `inject --userscript` stores values in the page's own `localStorage` under `__atb_gm__:<namespace>:`, readable by same-origin page scripts; do not put secrets there. `~/.atb/banner.json` stores only the agent name, readable browser name and timestamp for the once-per-10-minutes banner.
 
 WebSocket trust has four modes via `ATB_WS_TRUST_MODE`: `compat` (default; shape-only, warning header), `whitelist`, `token`, and `both` (whitelist + token, fail-closed). `compat` accepts a forged `Origin` from any local process by design; switch to `both` to close that. The HTTP API only accepts loopback `Host` headers and still requires `api-token`.
 

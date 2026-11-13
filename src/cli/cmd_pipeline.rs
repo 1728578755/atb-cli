@@ -19,7 +19,7 @@ pub(crate) fn submit_job(op: &str, args: Value) -> Result<Value> {
             return Ok(problem.to_json());
         }
     }
-    // 防御性第二道闸：所有调用点都应在 `ensure_server` 之前走
+    // 防御性第二道闸：所有调用点都应在 `ensure_server()` 之前走
     // [`async_dry_run_plan`]；万一以后新增的调用点漏了那一步，这里也绝不能把动作
     // 真的提交成后台 job——dry-run 的承诺是「不产生任何页面副作用」。
     if DRY_RUN.load(Ordering::Relaxed) {
@@ -36,7 +36,7 @@ pub(crate) fn submit_job(op: &str, args: Value) -> Result<Value> {
 /// `--dry-run` + `--async` 的统一短路，返回 `true` 表示已输出计划、调用方应直接返回。
 ///
 /// 异步路径以前绕过了所有 dry-run 检查：`atb click '#pay' --async --dry-run` 会真的
-/// 创建 job 并在后台点击。这里在**任何** `ensure_server` / HTTP 之前
+// 创建 job 并在后台点击。这里在**任何** `ensure_server()` / HTTP 之前
 /// 收口，且 args 仍走与真实提交同一份收尾（路径绝对化 + 预检 + 目标语法解析），
 /// 避免 dry-run 报「假绿」。
 pub(crate) fn async_dry_run_plan(op: &str, payload: &Value, is_async: bool) -> Result<bool> {
@@ -163,7 +163,296 @@ pub(crate) fn run_job_command(args: JobCommand) -> Result<()> {
             )?);
         }
         JobAction::Wait(args) => wait_job(&args)?,
+        // 2026-11-13：进度跟踪 + 超时 exec 结果取回。
+        JobAction::Tail(args) => tail_job(&args)?,
+        JobAction::Result(args) => job_result(&args)?,
     }
+    Ok(())
+}
+
+// `job tail <id>`：轮询 `/job/get/:id` 流式输出状态快照。
+///
+/// 默认每行一个 JSON，字段固定为
+/// `{ts, job_id, state, elapsed_ms, last_heartbeat, stalled[, progress]}`；
+/// 状态 / 进度变化时才输出（相同快照按 `--interval` 静默）。
+/// 任务结束后输出最终完整结果，并按 succeeded/failed/cancelled 映射 0/1/130。
+pub(crate) fn tail_job(args: &JobTailArgs) -> Result<()> {
+    if !args.timeout.is_finite() || args.timeout < 0.0 {
+        return Err(usage_failure(
+            "invalid_argument",
+            format!(
+                "job tail --timeout 必须是非负有限秒数（收到 {}）",
+                args.timeout
+            ),
+            "0 表示一直跟到任务结束（上限 24h）；也可以给 600 这类明确预算",
+        ));
+    }
+    // 0 = 直到结束；上限 24h 防止误写超大值挂死 CLI（与 http::request 的上限一致）。
+    let timeout = if args.timeout == 0.0 {
+        86_400.0
+    } else {
+        args.timeout.min(86_400.0)
+    };
+    let interval = if args.interval.is_finite() {
+        args.interval.clamp(0.05, 10.0)
+    } else {
+        0.5
+    };
+    ensure_server()?;
+    let path = format!("/job/get/{}", query_escape(&args.id));
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+    // (state, progress 文本, stalled)：只有这三者变化才输出新快照。
+    let mut last_snapshot: Option<(String, String, bool)> = None;
+    let mut last_job: Option<Value> = None;
+
+    loop {
+        let value = match request("GET", &path, None, 10.0) {
+            Ok(value) => value,
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    let message = err.to_string();
+                    return tail_timeout(&args.id, timeout, last_job.as_ref(), Some(&message));
+                }
+                sleep(Duration::from_secs_f64(interval));
+                continue;
+            }
+        };
+        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            // 响应读不出来（daemon 正在重启 / 404 空 body）是可重试的轮询错误；
+            // 其余（job_not_found / job_evicted）原样输出，print_json 映射 exit 2。
+            let recoverable = value.get("error_code").and_then(Value::as_str)
+                == Some("invalid_response")
+                && Instant::now() < deadline;
+            if recoverable {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                sleep(remaining.min(Duration::from_secs_f64(interval)));
+                continue;
+            }
+            print_json(value);
+            return Ok(());
+        }
+        let job = value.get("job").cloned().unwrap_or(Value::Null);
+        last_job = Some(job.clone());
+        let state = job
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let progress = job.get("progress").cloned().unwrap_or(Value::Null);
+        let stalled = job.get("stalled").and_then(Value::as_bool).unwrap_or(false);
+        let snapshot = (state.clone(), progress.to_string(), stalled);
+        if last_snapshot.as_ref() != Some(&snapshot) {
+            if args.human {
+                write_stdout(&job_tail_human_line(&job, &state));
+            } else {
+                let line = job_tail_line(&job, &args.id, &state, cli_epoch_millis(), &progress);
+                write_stdout(&serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_string()));
+            }
+            last_snapshot = Some(snapshot);
+        }
+        if state != "running" {
+            // 终态：输出完整结果（result/error/session_key 都在里面）。
+            print_json(value);
+            let code = match state.as_str() {
+                "succeeded" => 0,
+                "cancelled" => 130,
+                _ => EXIT_FAILURE,
+            };
+            if code != 0 {
+                FAILURE_EXIT_CODE.store(code, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return tail_timeout(&args.id, timeout, last_job.as_ref(), None);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        sleep(remaining.min(Duration::from_secs_f64(interval)));
+    }
+}
+
+// `job result <exec_id>`：取回 exec 超时后暂存的迟到结果。
+///
+/// 轮询 `GET /exec-result/:id`：命中即输出 `{ok:true,found:true,result,...}` 并
+/// exit 0；等待超时（默认 5s，可 `--wait`）输出 `exec_result_not_found` 且
+/// exit 3；`--wait 0` 的立即未命中按普通失败 exit 1。
+pub(crate) fn job_result(args: &JobResultArgs) -> Result<()> {
+    if !args.wait.is_finite() || args.wait < 0.0 {
+        return Err(usage_failure(
+            "invalid_argument",
+            format!("job result --wait 必须是非负有限秒数（收到 {}）", args.wait),
+            "例如 --wait 60；--wait 0 表示只查一次",
+        ));
+    }
+    let wait = args.wait.min(86_400.0);
+    let interval = if args.interval.is_finite() {
+        args.interval.clamp(0.05, 10.0)
+    } else {
+        0.5
+    };
+    ensure_server()?;
+    let path = format!("/exec-result/{}", query_escape(&args.id));
+    let deadline = Instant::now() + Duration::from_secs_f64(wait);
+    let mut last_error: Option<String> = None;
+
+    loop {
+        let value = match request("GET", &path, None, 10.0) {
+            Ok(value) => value,
+            Err(err) => {
+                // 轮询期传输错误不立刻判死；预算用完时把最后一次错误带进结果。
+                last_error = Some(err.to_string());
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                sleep(remaining.min(Duration::from_secs_f64(interval)));
+                continue;
+            }
+        };
+        if value.get("found").and_then(Value::as_bool) == Some(true) {
+            print_json(value);
+            return Ok(());
+        }
+        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            // `invalid_response`（旧 daemon 没有该路由时 axum 回 404 空 body）
+            // 属于可重试的轮询错误：等在预算内继续查，到期按「未找到」处理。
+            let recoverable = value.get("error_code").and_then(Value::as_str)
+                == Some("invalid_response")
+                && wait > 0.0
+                && Instant::now() < deadline;
+            if recoverable {
+                last_error = Some(
+                    value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("invalid_response")
+                        .to_string(),
+                );
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                sleep(remaining.min(Duration::from_secs_f64(interval)));
+                continue;
+            }
+            // 明确的 daemon 错误（token 失配等）：原样输出。
+            print_json(value);
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        sleep(remaining.min(Duration::from_secs_f64(interval)));
+    }
+
+    let ttl_sec = crate::settings::exec_result_ttl_sec();
+    let ttl_text = if ttl_sec.is_multiple_of(60) {
+        format!("{} 分钟", ttl_sec / 60)
+    } else {
+        format!("{ttl_sec} 秒")
+    };
+    let mut out = json!({
+        "ok": false,
+        "error_code": "exec_result_not_found",
+        "error": format!(
+            "exec 结果 {} 在 {:.1}s 内未找到（可能从未迟到、已被取走，或超过 TTL 已清理）",
+            args.id, wait
+        ),
+        "hint": format!(
+            "确认 exec_id 来自 exec_timeout 错误；迟到结果默认保留 {ttl_text}（ATB_EXEC_RESULT_TTL_SEC 可调）；稍后可重试 atb job result {} --wait 60",
+            args.id
+        ),
+        "exec_id": args.id,
+        "wait_sec": wait,
+        "ttl_seconds": ttl_sec,
+    });
+    if let Some(err) = last_error {
+        out["last_error"] = json!(err);
+    }
+    print_json(out);
+    // 等待过（--wait > 0）＝ 等待超时 → exit 3；--wait 0 的立即未命中 → exit 1
+    // （print_json 已按 ok:false 置 1）。
+    if wait > 0.0 {
+        FAILURE_EXIT_CODE.store(EXIT_JOB_TIMEOUT, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// 当前 epoch 毫秒（与 daemon 的 `last_heartbeat` 同一单位）。
+fn cli_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// running 任务的 elapsed 不能只看 daemon 的 `elapsed_ms`（它只在终态写入），
+/// 用 `started_at` / `created_at` 结合当前时钟补算。
+fn job_elapsed_ms_at(job: &Value, now_ms: u64) -> u64 {
+    if let Some(elapsed) = job
+        .get("elapsed_ms")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+    {
+        return elapsed;
+    }
+    let started = job
+        .get("started_at")
+        .and_then(Value::as_f64)
+        .or_else(|| job.get("created_at").and_then(Value::as_f64))
+        .unwrap_or(0.0);
+    let started_ms = (started * 1_000.0).max(0.0) as u64;
+    now_ms.saturating_sub(started_ms)
+}
+
+/// 一行 `job tail` JSONL 快照。
+fn job_tail_line(job: &Value, job_id: &str, state: &str, now_ms: u64, progress: &Value) -> Value {
+    let mut line = json!({
+        "ts": now_ms,
+        "job_id": job_id,
+        "state": state,
+        "elapsed_ms": job_elapsed_ms_at(job, now_ms),
+        "last_heartbeat": job.get("last_heartbeat").cloned().unwrap_or(Value::Null),
+        "heartbeat_age_ms": job.get("heartbeat_age_ms").cloned().unwrap_or(Value::Null),
+        "stalled": job.get("stalled").and_then(Value::as_bool).unwrap_or(false),
+    });
+    if !progress.is_null() {
+        line["progress"] = progress.clone();
+    }
+    line
+}
+
+/// `--human` 的一行：`[12.3s] running  elapsed=12.3s  heartbeat=2s ago`。
+fn job_tail_human_line(job: &Value, state: &str) -> String {
+    let elapsed_ms = job_elapsed_ms_at(job, cli_epoch_millis());
+    let elapsed_sec = elapsed_ms as f64 / 1_000.0;
+    let heartbeat = match job.get("heartbeat_age_ms").and_then(Value::as_u64) {
+        Some(age_ms) if age_ms >= 1_000 => format!("{}s ago", age_ms / 1_000),
+        Some(age_ms) => format!("{age_ms}ms ago"),
+        None => "unknown".to_string(),
+    };
+    format!("[{elapsed_sec:.1}s] {state}  elapsed={elapsed_sec:.1}s  heartbeat={heartbeat}")
+}
+
+/// `job tail` 超时出口：输出 `tail_timeout` 快照并 exit 3。
+fn tail_timeout(
+    job_id: &str,
+    timeout: f64,
+    last_job: Option<&Value>,
+    last_error: Option<&str>,
+) -> Result<()> {
+    let mut out = json!({
+        "ok": true,
+        "tail_timeout": true,
+        "job_id": job_id,
+        "timeout_sec": timeout,
+    });
+    if let Some(job) = last_job {
+        out["job"] = job.clone();
+    }
+    if let Some(err) = last_error {
+        out["last_error"] = json!(err);
+    }
+    print_json(out);
+    FAILURE_EXIT_CODE.store(EXIT_JOB_TIMEOUT, Ordering::Relaxed);
     Ok(())
 }
 
@@ -283,7 +572,7 @@ pub(crate) fn pipeline_http_timeout(steps: &Value) -> f64 {
 
 /// 合并 `stop_on_error` 的两种来源（步骤文件 / `--continue-on-error`）并回写生效值。
 ///
-/// 同一套「文件值优先、显式冲突报错、最终回显」的逻辑以前只写在 `run`
+// 同一套「文件值优先、显式冲突报错、最终回显」的逻辑以前只写在 `run`
 /// 里，`batch` 完全没有，导致两条管道对同一个键的处理完全不同。抽出来共用。
 fn apply_stop_on_error(
     object: &mut serde_json::Map<String, Value>,
@@ -338,7 +627,7 @@ pub(crate) fn cmd_run(args: RunArgs, is_async: bool) -> Result<()> {
             "顶层写成 {\"steps\":[...]}，或直接给一个数组",
         ));
     };
-    // 文件里的 stop_on_error 以前用 `entry.or_insert` 写入，
+    // ：文件里的 stop_on_error 以前用 `entry().or_insert()` 写入，
     // 文件给了值就静默盖掉 --continue-on-error。现在 run/batch 共用同一份合并逻辑。
     let stop_on_error = apply_stop_on_error(object, args.continue_on_error)?;
     let http_timeout = pipeline_http_timeout(&payload);
@@ -598,7 +887,7 @@ mod tests {
         assert_eq!(plan["would"]["args"]["script_truncated"], json!(true));
     }
 
-    /// `--dry-run --async` 必须在发请求前短路。
+    /// ：`--dry-run --async` 必须在发请求前短路。
     #[test]
     fn async_dry_run_plan_short_circuits() {
         let handled =
@@ -634,5 +923,56 @@ mod tests {
             )
         });
         assert!(handled.unwrap());
+    }
+
+    // running 任务用 started_at 补算 elapsed_ms；终态优先用 daemon 的 elapsed_ms。
+    #[test]
+    fn job_elapsed_ms_handles_running_and_finished() {
+        let running = json!({ "started_at": 100.0, "elapsed_ms": 0 });
+        assert_eq!(job_elapsed_ms_at(&running, 105_500), 5_500);
+        let finished = json!({ "started_at": 100.0, "elapsed_ms": 7_000 });
+        assert_eq!(job_elapsed_ms_at(&finished, 200_000), 7_000);
+        // 时钟回拨（now < started）夹到 0。
+        let skewed = json!({ "started_at": 500.0 });
+        assert_eq!(job_elapsed_ms_at(&skewed, 1_000), 0);
+    }
+
+    // tail 快照字段齐全；progress 存在时才附加。
+    #[test]
+    fn job_tail_line_shape() {
+        let job = json!({
+            "status": "running",
+            "started_at": 100.0,
+            "elapsed_ms": 0,
+            "last_heartbeat": 100_000,
+            "heartbeat_age_ms": 2_000,
+            "stalled": false,
+            "progress": { "step": 2, "total": 5 },
+        });
+        let line = job_tail_line(&job, "job-1", "running", 105_500, &job["progress"]);
+        assert_eq!(line["ts"], json!(105_500));
+        assert_eq!(line["job_id"], json!("job-1"));
+        assert_eq!(line["state"], json!("running"));
+        assert_eq!(line["elapsed_ms"], json!(5_500));
+        assert_eq!(line["last_heartbeat"], json!(100_000));
+        assert_eq!(line["stalled"], json!(false));
+        assert_eq!(line["progress"]["step"], json!(2));
+
+        let no_progress = job_tail_line(&job, "job-1", "running", 105_500, &Value::Null);
+        assert!(no_progress.get("progress").is_none());
+    }
+
+    // 人读行包含 elapsed 与 heartbeat 年龄。
+    #[test]
+    fn job_tail_human_line_contains_heartbeat() {
+        let job = json!({
+            "started_at": 100.0,
+            "elapsed_ms": 12_300,
+            "heartbeat_age_ms": 2_000,
+        });
+        let line = job_tail_human_line(&job, "running");
+        assert!(line.starts_with("[12.3s] running"));
+        assert!(line.contains("elapsed=12.3s"));
+        assert!(line.contains("heartbeat=2s ago"));
     }
 }

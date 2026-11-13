@@ -1,6 +1,6 @@
-// 收口轮 · 回归守卫（主 agent 补）
+// WS / 页面脚本回归守卫
 //
-// 这两条都是 报告里"已判定、但 复审时工作区仍未修"的问题：
+// 这两条是已判定、但需要持续守住的问题：
 // * page_action.setValue 的内层 `base` 遮蔽外层结果对象 → fill 成功却丢 ok；
 // * page_challenge 仅凭脚本标签判 interactive → challenge wait 必定耗满预算。
 //

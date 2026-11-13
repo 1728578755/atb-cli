@@ -160,7 +160,7 @@ function __abcSnapSecretField(el) {
   return /current-password|new-password|cc-number|cc-csc|one-time-code/.test(autocomplete);
 }
 
-/// 派生文本掩码（收口）：口径与 page_find.js 的 __abcMaskDerived
+// 派生文本掩码：口径与 page_find.js 的 __abcMaskDerived
 /// **逐字对齐**，两份文件语义相同但各留一份、各叫各的名字（见 page_action.js
 /// 头部的命名约定）。快照的 name 是**无障碍名**（可能来自 placeholder / label
 /// 正文），secret 字段上它常常就是半个明文（"请输入密码"、"卡号后四位"），必须一起掩码。
@@ -285,7 +285,7 @@ function __abcSnapshot(opts) {
     const all = root.querySelectorAll('*');
     for (const el of all) {
       const tag = el.tagName.toLowerCase();
-      // 便宜的过滤（tag / role / skipGeneric / interactiveOnly / img-alt）先做，
+      // E1-14：便宜的过滤（tag / role / skipGeneric / interactiveOnly / img-alt）先做，
       // 深分页时为前 offset 条省掉 CSS 选择器与回包对象的构造（name 仍要算，
       // 见下面的「占号 == 产出」约束）。
       if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'svg') continue;
@@ -371,7 +371,7 @@ function __abcSnapshot(opts) {
     total: hasMore ? null : index,
     total_known: !hasMore,
     has_more: hasMore,
-    // next_offset 与「已消费候选数」严格对齐（复核）：序号只在通过全部过滤
+    // next_offset 与「已消费候选数」严格对齐：序号只在通过全部过滤
     // （含 name 判定，E1-14b）之后才 +1，所以 offset+1 .. offset+items.length 这段
     // 一定是连续产出、没有空洞 —— 下一次从 next_offset+1 开始既不重复也不跳号。
     // 最后一批时 total === offset + items.length，与 items.length 自洽；还有下一批

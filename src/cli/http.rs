@@ -16,7 +16,7 @@ pub(crate) fn absolutize_path(raw: &str) -> String {
     absolutize_path_inner(raw).0
 }
 
-/// 同 [`absolutize_path`]，额外返回「是否发生了非 有损转换」。
+// 同 [`absolutize_path`]，额外返回「是否发生了非 UTF-8 有损转换」。
 ///
 /// `Path::to_string_lossy` 会把无法解码的字节替换成 U+FFFD：路径本身仍然「看起来
 /// 正常」，但 daemon 打开的是另一个不存在的文件。调用方应把 `lossy=true` 写进回包
@@ -58,7 +58,7 @@ fn absolutize_path_inner(raw: &str) -> (String, bool) {
     };
     // `cwd.join("./x.pdf")` 会保留 `./` 片段，报错信息里出现 `...\./x.pdf` 这种混合分隔符。
     let cleaned_path = path_clean::clean(&absolute);
-    // 先判断再 lossy：`to_str` 为 None 才说明原始字节不是合法。
+    // 先判断再 lossy：`to_str()` 为 None 才说明原始字节不是合法 UTF-8。
     let lossy = cleaned_path.to_str().is_none();
     let cleaned = cleaned_path.to_string_lossy().to_string();
     // Windows 上 Chrome 的 `DOM.setFileInputFiles` 只认反斜杠路径：传 `E:/a/b.pdf`
@@ -85,7 +85,7 @@ fn is_drive_relative(path: &Path) -> bool {
 
 /// 只对「确实是本地路径字段」的键做绝对化，避免误改选择器/URL。
 ///
-/// 任一字段发生非 有损转换时，在 payload 顶层写 `path_lossy: true`。
+// 任一字段发生非 UTF-8 有损转换时，在 payload 顶层写 `path_lossy: true`。
 pub(crate) fn absolutize_payload_paths(payload: &mut Value, keys: &[&str]) {
     let Some(object) = payload.as_object_mut() else {
         return;
@@ -257,7 +257,7 @@ pub(crate) fn degraded_daemon_error(reason: &str) -> anyhow::Error {
     )
 }
 
-/// CLI 侧 HTTP 失败的**结构化**载体。
+// CLI 侧 HTTP 失败的**结构化**载体。
 ///
 /// `request()` 以前只把 401 翻译成一句中文，调用方（`status`/`doctor`）只能靠字符串
 /// 子串猜「是超时还是 token 不匹配」。现在失败带着稳定的 `code` 与 `status` 往上抛，
@@ -328,7 +328,7 @@ pub(crate) fn request(
     // 所以这里对 401 + invalid_api_token 做一次「丢缓存重读 + 重发」，仍 401 才认定
     // 真的不匹配。POST 重发是安全的：401 表示请求被鉴权层拒绝，从未进入业务逻辑。
     for attempt in 0..2 {
-        // 必须同时看 HTTP status 与响应体。只看 body 会在两种情况下
+        // ：必须同时看 HTTP status 与响应体。只看 body 会在两种情况下
         // 漏判：daemon 的鉴权中间件直接回 401 但 body 不是我们的 JSON（或没有
         // error_code）；以及旧 daemon 回 403 表达同样的「token 不对」。
         let (status, value) = send_once(method, &url, &payload, timeout)?;
@@ -405,7 +405,7 @@ fn send_once(
     // 幂等键：CLI 全局 flag 透传给 daemon，daemon 对 60s 内同 key 的
     // POST 回放首次响应。旧版 daemon 忽略未知 header，向后兼容。
     //
-    // 一个 `--idempotency-key` 不能原样挂到多请求命令的每一条 POST 上
+    // v11：一个 `--idempotency-key` 不能原样挂到多请求命令的每一条 POST 上
     // （`close --tab a,b` 循环 /close、scrape 的 /open + 每个标签 /exec）。daemon 的
     // 幂等 scope 是 method+path+body，同 key 不同 scope 会直接 409，命令只执行第一条。
     // 这里按请求内容派生稳定子键：同一条子请求重发仍能回放，不同子请求互不冲突。
@@ -578,7 +578,7 @@ pub(crate) fn start_server() -> Result<()> {
         .arg("daemon")
         // 别拿 exe 目录当工作目录：相对路径参数（如 screenshot --out）会以安装目录为基准，
         // 既不可预期，装在只读位置时也可能直接失败。
-        // 与 `~` 展开同源：统一走 `config::home_dir`（内部即 dirs）。
+        // 与 `~` 展开同源：统一走 `config::home_dir()`。
         .current_dir(config::home_dir().unwrap_or_else(env::temp_dir))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -793,7 +793,7 @@ mod tests {
         assert!(Path::new(&out).is_absolute(), "应绝对化，实际 {out}");
     }
 
-    /// D11 / `C:foo.png` 既不是绝对路径，也不能靠 `cwd.join`（盘符会截断
+    /// ：`C:foo.png` 既不是绝对路径，也不能靠 `cwd.join()`（盘符会截断
     /// 基准路径）。下发前必须是绝对路径。
     #[cfg(windows)]
     #[test]
@@ -818,7 +818,7 @@ mod tests {
         assert_eq!(absolutize_path("   "), "   ");
     }
 
-    /// 多请求命令（close 多标签 / scrape）不能共用一个裸幂等键，
+    // v11：多请求命令（close 多标签 / scrape）不能共用一个裸幂等键，
     /// 否则 daemon 的 scope 判定会让第 2 个请求 409。子键只依赖请求内容，
     /// 同一条命令重跑仍然命中回放。
     #[test]

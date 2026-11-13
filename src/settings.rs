@@ -1,4 +1,4 @@
-//! 用户可调参数（修复轮统一入口）。
+//! 用户可调参数。
 //!
 //! 设计原则：
 //! - **默认值保持向后兼容**：不设置任何环境变量时，行为与本轮修复前一致或更安全；
@@ -23,7 +23,7 @@ fn parse_bool(raw: &str) -> Option<bool> {
 ///
 /// 把参数集中到 `settings.rs` 时只认新前缀，旧前缀会静默失效（尤其
 /// `NO_DEBUGGER` 这种安全开关）。这里统一走 `config::env_compat`，一个入口同时
-/// 兼容两套前缀；非 值按 `to_string_lossy` 处理（配置值本就是 ASCII）。
+/// 兼容两套前缀；非 UTF-8 值按 `to_string_lossy` 处理（配置值本就是 ASCII）。
 fn read_env(name: &str) -> Option<String> {
     if let Ok(value) = env::var(name) {
         return Some(value);
@@ -167,7 +167,7 @@ pub(crate) fn io_max_output_bytes() -> usize {
     env_usize_clamped("ATB_IO_MAX_OUTPUT_MB", 50, 1, 512) * 1024 * 1024
 }
 
-/// `ATB_EXEC_MAX_BYTES`：`exec` 回包在 daemon 侧的默认大小预算。
+// `ATB_EXEC_MAX_BYTES`：`exec` 回包在 daemon 侧的默认大小预算。
 ///
 /// 只在不传 `--max-bytes` 时生效：直连 API 的调用方从来不带这个字段，旧实现
 /// 等于完全不截断，一条 `exec` 就能把整页 innerHTML 之类的几百 MB 回包打给客户端。
@@ -484,6 +484,106 @@ pub(crate) fn download_wait_limit() -> usize {
 /// `ATB_DOWNLOAD_CANCEL_ON_TIMEOUT`：`download-wait` 超时是否向浏览器发起取消，默认关。
 pub(crate) fn download_cancel_on_timeout() -> bool {
     env_bool("ATB_DOWNLOAD_CANCEL_ON_TIMEOUT", false)
+}
+
+// ---------------------------------------------------------------------------
+// 2026-11-13 改进轮：长任务 / 持久注入 / 目标提示 / 等待与截图
+// ---------------------------------------------------------------------------
+
+/// `ATB_EXEC_RESULT_TTL_SEC`：`GET /exec-result/:exec_id` 的迟到结果保留时长。
+///
+/// 旧实现写死 300s：长任务（建索引、批量写库）90s 超时后结果 5 分钟就丢，
+/// 等用户看到提示时已经查不到了。值域 `60..=86400`，默认 `3600`。
+pub(crate) fn exec_result_ttl_sec() -> u64 {
+    env_u64_clamped("ATB_EXEC_RESULT_TTL_SEC", 3_600, 60, 86_400)
+}
+
+/// `ATB_INJECT_PERSIST_DEFAULT_TTL_SEC`：`inject --persist` 未显式给 `--ttl` 时的默认寿命。
+///
+/// 持久注入会与用户自己的油猴脚本抢执行，旧实现永久驻留且无提示。默认 2 小时；
+/// 要永久驻留必须显式 `--persist-forever --i-know-this-is-long-lived`。
+/// 值域 `60..=2592000`（30 天），默认 `7200`。
+pub(crate) fn inject_persist_default_ttl_sec() -> u64 {
+    env_u64_clamped("ATB_INJECT_PERSIST_DEFAULT_TTL_SEC", 7_200, 60, 2_592_000)
+}
+
+/// `ATB_INJECT_PERSIST_MAX_TTL_SEC`：`--ttl` 允许的最大值，默认 2592000（30 天）。
+pub(crate) fn inject_persist_max_ttl_sec() -> u64 {
+    env_u64_clamped("ATB_INJECT_PERSIST_MAX_TTL_SEC", 2_592_000, 60, 31_536_000)
+}
+
+/// `ATB_BROWSER_BANNER`：CLI 是否在 stderr 提示「当前操作的是哪个浏览器」。
+///
+/// - `off`：从不提示；
+/// - `once`（默认）：同一 agent + 同一浏览器在 10 分钟内只提示一次；
+/// - `always`：每条命令都提示。
+pub(crate) fn browser_banner() -> String {
+    env_enum("ATB_BROWSER_BANNER", "once", &["off", "once", "always"])
+}
+
+/// `ATB_OPEN_SPECIAL_WAIT_SEC`：`chrome://` / `chrome-extension://` / `about:` 等
+/// 特殊页面的 `--wait-for` 默认预算（秒）。正常页面仍用 `--timeout`。
+/// 值域 `0.5..=60`，默认 `3`。
+pub(crate) fn open_special_wait_sec() -> f64 {
+    env_f64_clamped("ATB_OPEN_SPECIAL_WAIT_SEC", 3.0, 0.5, 60.0)
+}
+
+/// `ATB_SCREENSHOT_SETTLE_MS`：`screenshot` 未显式给 `--settle-ms` 时的默认稳定等待。
+/// 值域 `0..=10000`，默认 `0`（不额外等待，保持旧行为）。
+pub(crate) fn screenshot_settle_ms() -> u64 {
+    env_u64_clamped("ATB_SCREENSHOT_SETTLE_MS", 0, 0, 10_000)
+}
+
+/// `ATB_SCREENSHOT_NETWORK_IDLE_MS`：`--network-idle` 的静默窗口（毫秒）。
+/// 值域 `50..=10000`，默认 `500`。
+pub(crate) fn screenshot_network_idle_ms() -> u64 {
+    env_u64_clamped("ATB_SCREENSHOT_NETWORK_IDLE_MS", 500, 50, 10_000)
+}
+
+/// `ATB_WAIT_DOM_STABLE_MS`：`wait --dom-stable` 的静默窗口（毫秒）。
+/// 值域 `50..=10000`，默认 `500`。
+pub(crate) fn wait_dom_stable_ms() -> u64 {
+    env_u64_clamped("ATB_WAIT_DOM_STABLE_MS", 500, 50, 10_000)
+}
+
+/// `ATB_CONSOLE_HISTORY_SETTLE_MS`：`console history` 挂上 CDP 监听后等待缓冲
+/// 事件回放的窗口（毫秒）。值域 `50..=5000`，默认 `300`。
+pub(crate) fn console_history_settle_ms() -> u64 {
+    env_u64_clamped("ATB_CONSOLE_HISTORY_SETTLE_MS", 300, 50, 5_000)
+}
+
+/// `ATB_JS_CHECK`：本地 JS 配平检查档位。
+///
+/// - `strict`（默认）：判为不配平时直接 exit 2；
+/// - `warn`：不拦截，结果里带 `warning` 交给浏览器执行；
+/// - `off`：完全跳过本地检查（`exec --no-preflight` 等价）。
+pub(crate) fn js_check() -> String {
+    env_enum("ATB_JS_CHECK", "strict", &["off", "warn", "strict"])
+}
+
+/// `ATB_TABS_LARGE_WARNING`：`tabs` 结果超过该条数时附加精简建议。
+/// 值域 `10..=500`，默认 `50`。
+pub(crate) fn tabs_large_warning() -> usize {
+    env_usize_clamped("ATB_TABS_LARGE_WARNING", 50, 10, 500)
+}
+
+/// `ATB_HIDDEN_TAB_WARNING`：目标标签页在后台时是否附加
+/// `warnings:["tab_hidden","timers_throttled"]` 与 `focus` 提示。
+/// 默认开启；确实不关心可见性差异的批量脚本可设为 off。
+pub(crate) fn hidden_tab_warning() -> bool {
+    env_bool("ATB_HIDDEN_TAB_WARNING", true)
+}
+
+/// `ATB_JOB_STALL_SEC`：`job list/tail` 判定「卡住」的心跳超时（秒）。
+/// 值域 `5..=3600`，默认 `60`。
+pub(crate) fn job_stall_sec() -> u64 {
+    env_u64_clamped("ATB_JOB_STALL_SEC", 60, 5, 3_600)
+}
+
+/// `ATB_SCRIPT_FILE_MAX_MB`：`exec --file` / `inject --file` 单个脚本文件上限（MiB）。
+/// 值域 `1..=256`，默认 `32`（Windows 命令行 32K 上限的另一条替代路径）。
+pub(crate) fn script_file_max_mb() -> usize {
+    env_usize_clamped("ATB_SCRIPT_FILE_MAX_MB", 32, 1, 256)
 }
 
 /// `ATB_DOWNLOAD_CANCEL_ERASE`：取消后是否擦除下载记录，默认关。

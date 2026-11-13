@@ -42,6 +42,48 @@ impl fmt::Display for OpenTargetError {
 
 impl std::error::Error for OpenTargetError {}
 
+/// `open` 解析器接受的显式 scheme。
+///
+/// `chrome-extension` 是新增的：本工具/浏览器自己的扩展页面可以由
+/// `chrome.tabs.create` 打开；其它扩展的页面由 Chrome 拒绝，daemon 原样回包
+/// 并附 hint。`chrome://` / `edge://` / `about:` / `devtools://` 仍不在列表里。
+pub const SUPPORTED_OPEN_SCHEMES: &[&str] = &["http", "https", "file", "chrome-extension"];
+
+/// 浏览器保留页面：扩展无权创建，必须用户手动打开后再用 `atb tabs` 选目标。
+pub const BROWSER_RESERVED_SCHEMES: &[&str] = &["chrome", "edge", "about", "devtools"];
+
+/// 命中浏览器保留 scheme 时统一附加的 hint（error.details.hint 与 CLI 共用）。
+pub const BROWSER_RESERVED_SCHEME_HINT: &str =
+    "chrome:// / edge:// / about: / devtools:// 页面不能由扩展创建；请手动打开后用 `atb tabs` 选择目标；chrome-extension:// 仅支持本工具自己的页面";
+
+// 该输入是否属于「特殊页面」scheme。
+///
+/// 只做前缀判断、不做 URL 归一化：`chrome://` 一旦被改写成 http 就再也打不开。
+pub fn special_page_scheme(input: &str) -> Option<&'static str> {
+    let lower = input.trim_start().to_ascii_lowercase();
+    if lower.starts_with("chrome-extension://") {
+        return Some("chrome-extension");
+    }
+    if lower.starts_with("chrome://") {
+        return Some("chrome");
+    }
+    if lower.starts_with("edge://") {
+        return Some("edge");
+    }
+    if lower.starts_with("devtools://") {
+        return Some("devtools");
+    }
+    if lower.starts_with("about:") {
+        return Some("about");
+    }
+    None
+}
+
+/// `open` 的目标是否落在特殊页面上（用于自动跳过 wait / 3s 等待预算）。
+pub fn is_special_page(input: &str) -> bool {
+    special_page_scheme(input).is_some()
+}
+
 pub fn resolve_open_target(
     input: &str,
     cwd: Option<&Path>,
@@ -109,7 +151,7 @@ pub fn resolve_open_target(
                     return Err(OpenTargetError::new(
                         "unsupported_scheme",
                         format!("Unsupported Open Target scheme: {scheme}"),
-                        json!({ "scheme": scheme, "supported_schemes": ["http", "https", "file"] }),
+                        json!({ "scheme": scheme, "supported_schemes": SUPPORTED_OPEN_SCHEMES }),
                     ));
                 }
                 return resolve_implicit_web(input);
@@ -118,11 +160,22 @@ pub fn resolve_open_target(
         return match scheme.as_str() {
             "http" | "https" => resolve_explicit_web(input, &scheme),
             "file" => resolve_file_url(input),
+            "chrome-extension" => resolve_extension_url(input),
+            // 浏览器保留页面：明确说明「扩展不能创建」，并给出可执行的替代路径。
+            _ if BROWSER_RESERVED_SCHEMES.contains(&scheme.as_str()) => Err(OpenTargetError::new(
+                "unsupported_scheme",
+                format!("Unsupported Open Target scheme: {scheme}（浏览器保留页面不能由扩展创建）"),
+                json!({
+                    "scheme": scheme,
+                    "supported_schemes": SUPPORTED_OPEN_SCHEMES,
+                    "hint": BROWSER_RESERVED_SCHEME_HINT,
+                }),
+            )),
             _ if looks_like_host_port(input) => resolve_implicit_web(input),
             _ => Err(OpenTargetError::new(
                 "unsupported_scheme",
                 format!("Unsupported Open Target scheme: {scheme}"),
-                json!({ "scheme": scheme, "supported_schemes": ["http", "https", "file"] }),
+                json!({ "scheme": scheme, "supported_schemes": SUPPORTED_OPEN_SCHEMES }),
             )),
         };
     }
@@ -258,6 +311,46 @@ fn resolve_explicit_web(
                 expected_scheme.to_uppercase()
             ),
             json!({ "open_target": input, "scheme": expected_scheme }),
+        ));
+    }
+    Ok(ResolvedOpenTarget {
+        navigation_url: input.to_string(),
+        kind: TargetKind::Web,
+    })
+}
+
+/// `chrome-extension://<扩展ID>/<路径>`：只做形状校验，原样交给扩展。
+///
+/// 是否「本工具自己的页面」由 Chrome 判定：外来扩展页面会被 `chrome.tabs.create`
+// 拒绝，daemon 把扩展的错误原样回包并附 hint。这里不猜扩展 ID，
+/// 也不做 URL 归一化（扩展页面的路径/查询串必须逐字保留）。
+fn resolve_extension_url(input: &str) -> Result<ResolvedOpenTarget, OpenTargetError> {
+    let parsed = Url::parse(input).map_err(|err| {
+        OpenTargetError::new(
+            "invalid_extension_url",
+            format!("Invalid chrome-extension URL: {err}"),
+            json!({ "open_target": input }),
+        )
+    })?;
+    if !parsed.scheme().eq_ignore_ascii_case("chrome-extension") {
+        return Err(OpenTargetError::new(
+            "invalid_extension_url",
+            format!("Not a chrome-extension URL: {}", parsed.scheme()),
+            json!({ "open_target": input, "scheme": parsed.scheme() }),
+        ));
+    }
+    if parsed.host_str().unwrap_or_default().is_empty() {
+        return Err(OpenTargetError::new(
+            "invalid_extension_url",
+            "chrome-extension URL must include an extension id (host)",
+            json!({ "open_target": input }),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.port().is_some() {
+        return Err(OpenTargetError::new(
+            "invalid_extension_url",
+            "chrome-extension URL must not contain credentials or a port",
+            json!({ "open_target": input }),
         ));
     }
     Ok(ResolvedOpenTarget {
@@ -546,7 +639,7 @@ fn resolve_local_path(
 
 fn expand_current_user_home(input: &str) -> Result<PathBuf, OpenTargetError> {
     if input == "~" || input.starts_with("~/") || (cfg!(windows) && input.starts_with("~\\")) {
-        // 统一走 config::home_dir：配置目录、`~` 展开、daemon cwd
+        // 统一走 config::home_dir()：配置目录、`~` 展开、daemon cwd
         // 必须用同一个 `dirs::home_dir()`，否则 Windows Git-Bash / WSL 下会分叉。
         let home = crate::config::home_dir().ok_or_else(|| {
             OpenTargetError::new(
@@ -771,6 +864,68 @@ mod tests {
     fn unsupported_schemes_are_rejected() {
         let err = resolve_open_target("mailto:user@example.com", None).unwrap_err();
         assert_eq!(err.code, "unsupported_scheme");
+        // 错误里必须告诉调用方 chrome-extension 是可用的 scheme。
+        let supported = err
+            .details
+            .get("supported_schemes")
+            .and_then(Value::as_array)
+            .expect("supported_schemes");
+        assert!(supported.iter().any(|item| item == "chrome-extension"));
+    }
+
+    // chrome-extension:// 允许进入 open 流程；外来扩展页面由 Chrome 拒绝。
+    #[test]
+    fn chrome_extension_urls_are_accepted_verbatim() {
+        for raw in [
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop/options.html",
+            "chrome-extension://abc/popup.html?x=1#y",
+        ] {
+            let resolved = resolve_open_target(raw, None).expect(raw);
+            assert_eq!(resolved.navigation_url, raw);
+            assert!(matches!(resolved.kind, TargetKind::Web));
+        }
+        // 缺扩展 ID（host）与带端口都不接受。
+        for raw in [
+            "chrome-extension:///options.html",
+            "chrome-extension://abc:99/x",
+        ] {
+            let err = resolve_open_target(raw, None).unwrap_err();
+            assert_eq!(err.code, "invalid_extension_url", "input: {raw}");
+        }
+    }
+
+    // 浏览器保留页面仍然拒绝，并给出「手动打开 + atb tabs 选择」的 hint。
+    #[test]
+    fn browser_reserved_schemes_are_rejected_with_hint() {
+        for raw in [
+            "chrome://settings",
+            "edge://settings",
+            "about:blank",
+            "devtools://devtools/bundled/inspector.html",
+        ] {
+            let err = resolve_open_target(raw, None).unwrap_err();
+            assert_eq!(err.code, "unsupported_scheme", "input: {raw}");
+            let hint = err
+                .details
+                .get("hint")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(hint.contains("atb tabs"), "hint: {hint}");
+            assert!(hint.contains("chrome-extension://"), "hint: {hint}");
+        }
+        // special_page_scheme 覆盖 5 类特殊页面（含 chrome-extension）。
+        assert_eq!(special_page_scheme("chrome://settings"), Some("chrome"));
+        assert_eq!(special_page_scheme("edge://settings"), Some("edge"));
+        assert_eq!(special_page_scheme("about:blank"), Some("about"));
+        assert_eq!(
+            special_page_scheme("devtools://devtools/bundled/inspector.html"),
+            Some("devtools")
+        );
+        assert_eq!(
+            special_page_scheme("chrome-extension://abc/x.html"),
+            Some("chrome-extension")
+        );
+        assert!(!is_special_page("https://example.com"));
     }
 
     #[cfg(unix)]

@@ -64,7 +64,7 @@ function createContext(beforeRun) {
 
 /// 每个用例的入口：真实取到 __abcNet 并记录它属于哪个 context。
 /// 返回 null 表示脚本没暴露入口——调用方必须显式判红，不能因为 `typeof` 不是
-/// function 就跳过断言（恒绿就是这么来的）。
+// function 就跳过断言。
 function loadPageNet(beforeRun) {
   const context = createContext(beforeRun);
   const fn = context.__abcNet || context.window.__abcNet;
@@ -181,7 +181,7 @@ const rule = { match: '/api/contract/*', status: 201, body: '{"ok":1}' };
   }
 }
 
-// ---- 用例 7：delete 能真的删掉入口（旧断言在 delete 失败时也恒真） ----
+// ---- 用例 7：delete 能真的删掉入口 ----
 {
   const loaded = loadPageNet();
   const net = requireNet('delete 入口', loaded);

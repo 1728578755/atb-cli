@@ -1,4 +1,4 @@
-// page_net 的「响应改写」安全性。
+// page_net 的「响应改写」安全性（N3-03）。
 //
 // 旧实现只要规则里出现 `response`，就会用 `await response.clone().text()` 取原响应体；
 // 取不到时 body 保持空串，照样 `new Response('')` 返回给页面，日志还写

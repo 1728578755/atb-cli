@@ -180,7 +180,7 @@ pub(crate) fn wrap_with_mutation_watch(script: &str) -> String {
       __abcResult = await (new __abcAsync(trimmed))();
     }} else {{
       try {{
-        // 用户代码**直接** eval，不加任何前缀。
+        // ：用户代码**直接** eval，不加任何前缀。
         // 旧实现 `eval('__abcStarted = true;\n' + trimmed)` 让首行 `"use strict"` 不再是
         // 指令序言（整段退化成非严格模式），行号也整体 +1；monitor 这条路径当时漏改了。
         const __abcValue = eval(trimmed);
@@ -310,7 +310,7 @@ if (entry.id !== ID) return {{ status: 'superseded' }};
 window[KEY] = null;
 const state = entry.state || {{ changed: 0, added: 0, removed: 0, attributes: 0, text: 0, samples: [], overflow: 0 }};
 if (entry.observer) {{
-  // 还没跑回调的尾部记录也要计入（回调负责累加，这里不再遍历原始记录）。
+  // 还没跑回调的尾部记录也要计入。
   if (typeof entry.consume === 'function') {{
     try {{ entry.consume(entry.observer.takeRecords()); }} catch (_) {{}}
   }}

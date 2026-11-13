@@ -200,6 +200,24 @@
     </div>
 
     <div class="card">
+      <div class="card-head"><h2 class="card-title">调试注入</h2><span class="card-sub">默认值</span></div>
+      <div class="field">
+        <label class="field-label" for="persistTtlSec">持久注入过期时间</label>
+        <select id="persistTtlSec" class="select">
+          <option value="1800">30 分钟</option>
+          <option value="7200">2 小时（默认）</option>
+          <option value="28800">8 小时</option>
+          <option value="86400">24 小时</option>
+        </select>
+        <p class="hint">--persist 的默认过期时间；永久驻留需 CLI 显式确认。</p>
+      </div>
+      <p class="hint">后台标签页：默认开；<br><code>ATB_HIDDEN_TAB_WARNING=off</code> 关闭。</p>
+      <p class="hint">console：<code>atb console history --settle-ms 300</code><br>或 <code>ATB_CONSOLE_HISTORY_SETTLE_MS</code>。</p>
+      <div class="msg" id="debugMsg" role="status" aria-live="polite"></div>
+      <p class="hint">management 权限只用于列出已安装扩展；在管理页「关于 → 高级权限」由你手动授权。</p>
+    </div>
+
+    <div class="card">
       <div class="card-head"><h2 class="card-title">维护</h2></div>
       <div class="field-row">
         <button id="reloadExt" class="btn btn-secondary" type="button">重新加载扩展</button>

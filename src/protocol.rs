@@ -69,11 +69,11 @@ pub struct Session {
     pub info: TabInfo,
     /// 这条会话所属扩展连接的下行通道。
     ///
-    /// 有界通道。发送必须走 `server::send_downstream`，让「队列满」
+    // 有界通道。发送必须走 `server::send_downstream`，让「队列满」
     /// 变成结构化 `ws_backpressure`，而不是在内存里无限积压。
     pub sender: mpsc::Sender<String>,
     pub disconnected_at: Option<Instant>,
-    /// 最近一次注册这条会话的 WebSocket 连接 id（连接代际）。
+    // 最近一次注册这条会话的 WebSocket 连接 id。
     ///
     /// `session_key` 是确定性拼接（browser/profile/tab），扩展重载后新连接会
     /// **拿到同一个 key**。断开清理若只看 key 就会把新连接刚注册的会话标成断开再删掉，
@@ -183,16 +183,16 @@ pub struct DriverState {
     pub default_session_key: Option<String>,
     pub latest_session_key: Option<String>,
     pub preferred_default_session_key: Option<String>,
-    /// `preferred_default_session_key` 的登记时刻（unix 秒）。
+    // `preferred_default_session_key` 的登记时刻。
     ///
     /// 与 key **同生共死**：设置走 [`DriverState::set_preferred_default_session`]、
     /// 清理走 [`DriverState::clear_preferred_default_session`]，任何一处漏写都会让
     /// 这份记忆变成永不过期的脏数据（默认目标再也建立不起来）。
     ///
-    /// TTL 判定已改用下面的单调时刻，本字段只作为**兼容旧值/测试**的
+    // TTL 判定已改用下面的单调时刻，本字段只作为**兼容旧值/测试**的
     /// 回退来源（外部按 unix 秒直接写入时仍能按非负年龄判过期）。
     pub preferred_default_session_at: Option<f64>,
-    /// 登记时刻的单调时钟版本。
+    // 登记时刻的单调时钟版本。
     ///
     /// 系统时钟回拨时 unix 秒差会变成负数，旧判据 `now - at < TTL` 会把一条
     /// 早已过期的记忆判成「永远有效」。`Instant` 不受墙钟调整影响，是本进程内
@@ -217,7 +217,7 @@ impl DriverState {
     /// 过期的记忆在这里**只当作不存在**，不清理字段（`&self` 清不了）：清理由
     /// [`Self::expire_preferred_default_session`] 在快照入口做一次。
     ///
-    /// 判据：
+    // 判据：
     /// 1. key 与登记时刻**同生共死**——key 有值但没有任何时间戳时视为无效，
     ///    不再把「字段被直接写坏」的旧值当成永久有效；
     /// 2. 优先用单调时钟 `Instant`：系统时钟回拨不会让 TTL 失效；
@@ -342,7 +342,7 @@ pub enum WsIncoming {
         /// 扩展自检发现的问题（`queryTabs` / `tabGroups` / `restartSeq` 之类异常）。
         ///
         /// 扩展在 `connectWS` 的 finally 块里会发这个数组，但 daemon 侧长期没有建模，
-        /// serde 直接丢弃 —— 用户看不到「为什么这次上报的 tabs 是空的」。
+        /// serde 直接丢弃 —— 用户看不到「为什么这次上报的 tabs 是空的」（R-19）。
         #[serde(default)]
         warnings: Vec<Value>,
         #[serde(default, deserialize_with = "deserialize_ext_tabs")]
@@ -407,10 +407,10 @@ pub struct ExtTab {
 /// 手写 `Deserialize`：`id` 不合法时**拒绝这一条**。
 ///
 /// 派生实现会把任意 JSON 收进 `Value`，于是对象/数组类型的 id 会被
-/// `Value::to_string()` 变成 `{"a":1}` 这种伪 id，混进会话表后按 id 查找永远对不上。
-/// 调用方（`Vec<ExtTab>` 的逐条 `from_value`）会把 Err 当成「丢掉这条」。
+/// `Value::to_string()` 变成 `{"a":1}` 这种伪 id，混进会话表后按 id 查找永远对不上
+// 。调用方（`Vec<ExtTab>` 的逐条 `from_value`）会把 Err 当成「丢掉这条」。
 ///
-/// **负数与非正整数同样拒绝**。Chrome 的 tabId 恒为正整数，负值只能是
+// **负数与非正整数同样拒绝**。Chrome 的 tabId 恒为正整数，负值只能是
 /// 扩展被篡改或上游协议写错；旧实现会让它一路进会话表，直到执行时才报错，归因失真。
 /// 空字符串 / 纯空白同理——它拼出来的 `b:p:` 会让所有非法标签塌缩成同一个会话 key。
 impl<'de> Deserialize<'de> for ExtTab {
@@ -507,7 +507,7 @@ pub fn make_session_key(browser_id: &str, profile_id: &str, tab_id: &str) -> Str
 /// `tabs` 字段的反序列化：逐个校验，`id` 类型不合法的标签**直接丢弃**。
 ///
 /// 放在反序列化阶段而不是调用点，是因为 `tabs` 由扩展推送（不可信输入），而丢弃
-/// 必须在「进会话表之前」发生；这样即使调用方忘了过滤，也不会出现伪 id。
+// 必须在「进会话表之前」发生；这样即使调用方忘了过滤，也不会出现伪 id。
 fn deserialize_ext_tabs<'de, D>(deserializer: D) -> Result<Vec<ExtTab>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -569,7 +569,7 @@ mod tests {
         assert_eq!(info.session_key, "b:p:7");
     }
 
-    /// 负 id / 0 / 空串必须在反序列化阶段就被丢掉。
+    // 负 id / 0 / 空串必须在反序列化阶段就被丢掉。
     ///
     /// 旧实现只校验「是字符串或整数」，负值一路进会话表（执行时才报错，归因失真），
     /// 空串则让所有非法标签塌缩成同一个 `b:p:` 会话 key。
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(tabs.len(), 1);
     }
 
-    /// key 与时间戳必须同生共死——只有 key、没有时间戳的记忆视为无效。
+    // key 与时间戳必须同生共死——只有 key、没有时间戳的记忆视为无效。
     #[test]
     fn preferred_default_requires_a_timestamp() {
         let mut driver = DriverState {
@@ -628,7 +628,7 @@ mod tests {
         assert!(driver.preferred_default_session_at_instant.is_none());
     }
 
-    /// unix 秒回退判据要求年龄非负——时钟回拨造成的「未来时间戳」
+    // unix 秒回退判据要求年龄非负——时钟回拨造成的「未来时间戳」
     /// 必须按过期处理，不能变成永不过期。
     #[test]
     fn preferred_default_rejects_negative_age_after_clock_rollback() {
@@ -644,7 +644,7 @@ mod tests {
         assert!(driver.expire_preferred_default_session());
     }
 
-    /// 正常设置走单调时钟，读取有效；清除时三个字段一起清。
+    // 正常设置走单调时钟，读取有效；清除时三个字段一起清。
     #[test]
     fn preferred_default_uses_monotonic_clock() {
         let mut driver = DriverState::default();

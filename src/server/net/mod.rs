@@ -92,7 +92,7 @@ pub(crate) fn reset_outcome_ok(page_ok: bool, cdp_stopped: bool, hook_removed: &
     page_ok && cdp_stopped && hook_removed.get("ok").and_then(Value::as_bool) == Some(true)
 }
 
-/// 页面持久注入重放时的裁剪信息（观测缺口）。
+// 页面持久注入重放时的裁剪信息。
 ///
 /// 页面侧 `page_net.js` 的重放只接受前 `MAX_ROUTES`（64）条，并回报
 /// `routes_dropped`；daemon 侧以前完全不读它，于是 env 把 `ATB_NET_RULE_MAX_RULES`
@@ -781,7 +781,7 @@ pub(crate) async fn net_value(state: &AppState, req: NetRequest) -> Result<Value
     // 的观测缺口：页面侧重放只保留前 `MAX_ROUTES`（64）条，丢弃条数由页面在
     // `routes_dropped` 里回报。daemon 以前完全不读它 —— 用户把 `ATB_NET_RULE_MAX_RULES`
     // 放大到 64 以上、堆了 100+ 条规则时，`net routes` 显示全量、浏览器只生效前 64 条，
-    // 却没有任何提示（正是 要消灭的「配置与实际生效集漂移」，只是挪到了 env 放大档）。
+    // 却没有任何提示。
     // 先在 `payload` 被移进 `result` 之前取出来。
     let dropped_note = routes_dropped_note(&payload);
     let mut result = json!({
@@ -875,7 +875,7 @@ fn split_reset_failures(failures: &[Value]) -> (Vec<Value>, Vec<Value>) {
 mod net_outcome_tests {
     use super::*;
 
-    /// 契约：`net reset` 的 ok 必须同时覆盖页面 reset、CDP stop、hook 删除。
+    // v11 契约：`net reset` 的 ok 必须同时覆盖页面 reset、CDP stop、hook 删除。
     /// 旧实现漏掉第三项 —— 持久注入删不掉时报成功，旧 mock 下次导航复活。
     #[test]
     fn reset_requires_hook_removal() {

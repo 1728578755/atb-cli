@@ -342,6 +342,33 @@
             <button class="btn btn-secondary btn-sm" id="btnPreviewPopup" type="button">打开弹窗页面预览</button>
           </div>
         </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">调试注入</h2>
+            <span class="card-sub">默认值，与弹窗设置同步</span>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-text">
+              <div class="setting-title">持久注入过期时间</div>
+              <div class="setting-desc"><code>--persist</code> 的默认过期时间；永久驻留需 CLI 显式确认。</div>
+            </div>
+            <div class="setting-control">
+              <select class="select" id="persistTtlSelect" aria-label="持久注入过期时间">
+                <option value="1800">30 分钟</option>
+                <option value="7200">2 小时（默认）</option>
+                <option value="28800">8 小时</option>
+                <option value="86400">24 小时</option>
+              </select>
+            </div>
+          </div>
+
+          <p class="hint">后台标签页：默认开；<code>ATB_HIDDEN_TAB_WARNING=off</code> 关闭。</p>
+          <p class="hint">console 采样：CLI 用 <code>atb console history --settle-ms 300</code> 或 <code>ATB_CONSOLE_HISTORY_SETTLE_MS</code>。</p>
+          <div class="msg" id="debugMsg" role="status" aria-live="polite"></div>
+          <p class="hint">persistTtlSec 存在扩展本机 storage，popup 与 options 通过 storage.onChanged 实时同步；不会上传。</p>
+        </div>
       </section>
 
       <!-- ============================================================ 诊断 -->
@@ -396,7 +423,28 @@
         <div class="card">
           <div class="card-head"><h2 class="card-title">权限</h2><span class="card-sub">manifest 声明</span></div>
           <ul class="perm-list" id="permList"></ul>
-          <p class="hint">扩展不声明 management / contentSettings，不会枚举或修改你安装的其他扩展与站点设置。</p>
+          <p class="hint">扩展默认不声明 management / contentSettings。management 只在下面的「高级权限」里由你手动授权，且只用于列出已安装扩展。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">高级权限</h2>
+            <span class="card-sub">可选，不授权不影响其它功能</span>
+          </div>
+          <div class="setting-row">
+            <div class="setting-text">
+              <div class="setting-title">读取扩展列表（management）</div>
+              <div class="setting-desc">management 权限只用于列出已安装扩展；不修改、不停用任何扩展。</div>
+            </div>
+            <div class="setting-control">
+              <span class="pill" id="mgmtPermPill" role="status" aria-live="polite">
+                <i class="dot"></i><span id="mgmtPermText">检测中</span>
+              </span>
+              <button class="btn btn-secondary" id="btnGrantManagement" type="button">授权读取扩展列表</button>
+            </div>
+          </div>
+          <div class="msg" id="mgmtPermMsg" role="status" aria-live="polite"></div>
+          <p class="hint">授权后可以运行 <code>atb extensions</code>。权限随时可以在 <code>chrome://extensions</code> 的详情页里撤销；本页不会自动请求权限。</p>
         </div>
 
         <div class="card">

@@ -162,6 +162,11 @@ fn apply_fields_limit(value: &mut Value, fields: Option<&[String]>, limit: Optio
             metadata.insert("limit".to_string(), json!(limit));
             metadata.insert("total_before_limit".to_string(), json!(total));
         }
+        // 大列表提示只对「没有自行裁剪」的调用方有意义：既然已经用 --fields /
+        // --limit 缩小了输出，就不该再提示同一条建议。
+        if fields.is_some() || limit.is_some_and(|value| value > 0) {
+            metadata.remove("suggest");
+        }
     }
     if let Some(slots) = value
         .pointer_mut("/result/metadata/tabs")
@@ -178,13 +183,25 @@ pub(crate) fn cmd_tabs(args: TabsArgs, is_async: bool) -> Result<()> {
     ensure_server()?;
     let mut path = "/tabs".to_string();
     let mut query = Vec::new();
-    if let Some(browser) = args.browser {
-        query.push(format!("browser={}", query_escape(&browser)));
+    if let Some(browser) = args.browser.as_deref() {
+        query.push(format!("browser={}", query_escape(browser)));
     }
-    if let Some(profile) = args.profile {
-        query.push(format!("profile={}", query_escape(&profile)));
+    if let Some(profile) = args.profile.as_deref() {
+        query.push(format!("profile={}", query_escape(profile)));
     }
-    if args.full {
+    // 过滤在 daemon 侧执行（GET Query），CLI 只负责参数转义与输出格式。
+    if let Some(url) = args.url_contains.as_deref() {
+        query.push(format!("url_contains={}", query_escape(url)));
+    }
+    if let Some(title) = args.title_contains.as_deref() {
+        query.push(format!("title_contains={}", query_escape(title)));
+    }
+    if let Some(filter) = args.filter.as_deref() {
+        query.push(format!("filter={}", query_escape(filter)));
+    }
+    // tsv 的输出契约是「完整 URL」：daemon 默认把 URL 截到 80 字符，这里必须
+    // 显式要 full，否则同一标签在 json / tsv 下看到的 URL 长度不同。
+    if args.full || args.format == "tsv" {
         query.push("full=true".to_string());
     }
     if args.mine {
@@ -196,32 +213,96 @@ pub(crate) fn cmd_tabs(args: TabsArgs, is_async: bool) -> Result<()> {
         path.push('?');
         path.push_str(&query.join("&"));
     }
-    let mut value = request("GET", &path, None, 30.0)?;
-    let trimming = fields.is_some() || args.limit.is_some();
-    if !args.ids {
-        if trimming {
-            // 旧实现带不带 --ids 都回全量字段；现在 --fields/--limit 在 CLI 侧裁剪，
-            // daemon 返回结构不变，没给这两个 flag 时输出与旧版完全一致。
-            apply_fields_limit(&mut value, fields.as_deref(), args.limit);
-        }
-        print_json(value);
-        return Ok(());
-    }
-    // `ok:false` 时必须原样带出错误与 error_code：以前只搬了 ok，再附加一条与错误无关的
-    // hint，把 Agent 引向「继续选目标」而不是「先修问题」。
+    let value = request("GET", &path, None, 30.0)?;
+    // `ok:false` 必须原样带出错误与 error_code（print_json 负责映射退出码）；
+    // jsonl/tsv 也不能把错误吞成空输出，否则调用方会以为「列表就是空的」。
     if value.get("ok").and_then(Value::as_bool) == Some(false) {
         print_json(value);
         return Ok(());
     }
-    // 精简视图：只留选目标要用的字段，省 token 也省得智能体在长 JSON 里找 tab_id。
-    print_json(tabs_ids_view(&value, fields.as_deref(), args.limit));
+    let trimming = fields.is_some() || args.limit.is_some();
+    match args.format.as_str() {
+        "jsonl" => {
+            if args.ids {
+                let view = tabs_ids_view(&value, fields.as_deref(), args.limit);
+                for item in view
+                    .get("tabs")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    write_jsonl(item);
+                }
+            } else {
+                let mut value = value;
+                if trimming {
+                    apply_fields_limit(&mut value, fields.as_deref(), args.limit);
+                }
+                for item in tabs_metadata_array(&value) {
+                    write_jsonl(item);
+                }
+            }
+        }
+        "tsv" => {
+            // 列是格式的一部分：`tab_id\t标题\tURL`。`--fields` 不参与（否则列会
+            // 缺项），但 `--limit` 依然生效；空列表输出空，不输出表头。
+            let limit = args.limit.filter(|value| *value > 0).unwrap_or(usize::MAX);
+            for item in tabs_metadata_array(&value).iter().take(limit) {
+                write_tabs_tsv(item);
+            }
+        }
+        // clap 的 value_parser 已把取值限制在 json/jsonl/tsv，这里保持防御性兜底。
+        _ => {
+            if args.ids {
+                print_json(tabs_ids_view(&value, fields.as_deref(), args.limit));
+            } else {
+                let mut value = value;
+                if trimming {
+                    apply_fields_limit(&mut value, fields.as_deref(), args.limit);
+                }
+                print_json(value);
+            }
+        }
+    }
     Ok(())
+}
+
+/// `/tabs` 回包里 `result.metadata.tabs` 的数组视图（daemon 默认结构）。
+fn tabs_metadata_array(value: &Value) -> &[Value] {
+    value
+        .pointer("/result/metadata/tabs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+/// JSONL：一行一个标签页对象，不包外层响应。
+fn write_jsonl(item: &Value) {
+    let line = serde_json::to_string(item).unwrap_or_else(|_| "null".to_string());
+    write_stdout(&line);
+}
+
+/// 单元格里的 tab / 换行会破坏 TSV 的行列结构，统一替换成空格。
+fn tsv_cell(text: &str) -> String {
+    text.replace(['\t', '\r', '\n'], " ")
+}
+
+/// TSV：`tab_id\t标题\tURL`（URL 由调用方确保是 full）。
+fn tabs_tsv_line(item: &Value) -> String {
+    let tab_id = item.get("tab_id").and_then(Value::as_str).unwrap_or("");
+    let title = item.get("title").and_then(Value::as_str).unwrap_or("");
+    let url = item.get("url").and_then(Value::as_str).unwrap_or("");
+    format!("{tab_id}\t{}\t{}", tsv_cell(title), tsv_cell(url))
+}
+
+fn write_tabs_tsv(item: &Value) {
+    write_stdout(&tabs_tsv_line(item));
 }
 
 /// `tabs --ids` 的精简视图（与 full 视图共用 `--limit` 语义）。
 ///
-/// `--limit 0` = 不截断：full 视图早已按 / 这么定义，ids 路径以前
-/// 直接 `truncate(0)` 返回空列表，同一条命令只是换了输出形态就得到相反的结果。
+// `--limit 0` = 不截断：full 视图早已按 / 这么定义，ids 路径以前
+// 直接 `truncate(0)` 返回空列表，同一条命令只是换了输出形态就得到相反的结果。
 fn tabs_ids_view(value: &Value, fields: Option<&[String]>, limit: Option<usize>) -> Value {
     let tabs = value
         .pointer("/result/metadata/tabs")
@@ -308,7 +389,7 @@ mod tests {
         })
     }
 
-    /// D10 / `--ids --limit 0` 与 full 视图同语义（0 = 不截断）。
+    /// ：`--ids --limit 0` 与 full 视图同语义（0 = 不截断）。
     #[test]
     fn ids_view_limit_zero_means_no_truncation() {
         let view = tabs_ids_view(&sample_tabs(), None, Some(0));
@@ -333,5 +414,21 @@ mod tests {
         let view = tabs_ids_view(&sample_tabs(), Some(&fields), None);
         assert_eq!(view["tabs"][0]["session_key"], json!("s1"));
         assert!(view["tabs"][0].get("title").is_none());
+    }
+
+    // TSV 固定三列；标题里的 tab / 换行替换成空格，URL 保持完整。
+    #[test]
+    fn tsv_line_sanitizes_title_and_keeps_full_url() {
+        let tab = json!({
+            "tab_id": "123",
+            "title": "A\tB\nC",
+            "url": "https://example.com/a/very/long/path?query=1",
+        });
+        assert_eq!(
+            tabs_tsv_line(&tab),
+            "123\tA B C\thttps://example.com/a/very/long/path?query=1"
+        );
+        // 缺字段时给空单元格，不 panic。
+        assert_eq!(tabs_tsv_line(&json!({})), "\t\t");
     }
 }

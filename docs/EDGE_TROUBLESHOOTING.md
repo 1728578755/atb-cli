@@ -172,7 +172,7 @@ atb doctor        # 逐项自检
 atb logs --tail 100
 ```
 
-### 扩展 5.4.2 的行为变化
+### 扩展 5.4.2 起的行为变化
 
 - **open shadow DOM**：`find` / `snapshot` / `read` 现在会递归 open shadow root，返回项多出 `scope` / `host_selector` / `shadow_path` 字段（这些字段 5.4.0 之前的版本就已提供）。旧版扩展不返回这些字段，daemon 仍按旧形状解析，不会报错，但拿不到 shadow 内容——这才是「明明页面上有按钮却 `find` 不到」的常见原因，先确认扩展卡片是 5.4.2。
 - **exec 取消帧**：daemon 在命令超时/取消时会向扩展发 `{cmd:"cancel", execId}`。**旧 daemon 不认识这个帧也无所谓**：扩展只是不提前释放那次 CDP attach，等 idle 定时器回收即可，命令结果与错误语义都不受影响。反过来，5.4.2 扩展配旧 daemon 时也不会因为缺少 cancel 帧而失败。
@@ -183,7 +183,41 @@ atb logs --tail 100
 
 ---
 
-## 8. 仍然失败时，请提供这些信息
+## 8. Edge 下的 `chrome-extension://` 页面与扩展列表
+
+### 8.1 打开扩展页面
+
+`atb open` 支持 `chrome-extension://<扩展ID>/<路径>`，但这是**浏览器级限制**：
+
+- 只有本工具自己的扩展页面（例如 `chrome-extension://<ATB ID>/options.html`）可以可靠打开；
+- 打开别的扩展页面会被 Chrome / Edge 拒绝，回 `special_scheme_open_failed`（错误里会说明是浏览器限制）；
+- 页面里内嵌了**其它扩展**的 iframe 时，`exec` / `screenshot` / `network` 等 CDP 路径仍可能 `page_protected`（crbug 40753571），换 `read` / `scan` / `mouse-click` 或临时禁用挡路扩展。
+
+扩展 ID 在 `edge://extensions`（Chrome 为 `chrome://extensions`）的本扩展卡片上；`atb status` / `atb tabs` 的 `browser_id` 不是扩展 ID，不要混用。
+
+### 8.2 `atb extensions` 报 `permission_required`
+
+`management` 是 **optional 权限**，manifest 不会在安装时自动授予，CLI 也不会替用户点授权：
+
+1. 打开扩展管理页 →「关于」→「高级权限」；
+2. 点「授权读取扩展列表」，在浏览器弹窗里确认；
+3. 重试 `atb extensions`；成功回包 `permission_granted:true`。
+
+排障：
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 授权按钮点了没反应 / 提示不支持 | Edge 企业策略禁用了 `chrome.permissions` 或 optional 权限申请；请管理员在 `edge://policy` 放开，或换个人设备。扩展详情页不能代替 optional 权限授权 |
+| 仍报 `permission_required` | 授权被拒绝或策略覆盖；`atb extensions` 不会自动降级成「只列本工具」，这是刻意行为 |
+| 报 `extension_outdated` | 浏览器里跑的扩展还没有 `listExtensions`：用 `assets/atb_bridge` 重新部署并在 `edge://extensions` 重新加载 |
+| 列表为空但确实装了扩展 | 默认只列**启用**的扩展；加 `--include-disabled` 再试 |
+| 列表里有名字/版本为空的项 | 扩展自身没有提供元数据；不是 atb 读取失败，按 `id` 在 `edge://extensions` 定位 |
+
+`atb extensions` 只读（`chrome.management.getAll`），没有启用 / 停用 / 卸载能力。不想保留授权时，在同一「高级权限」区撤销即可；撤销后只有 `atb extensions` 失败，其它命令不受影响。
+
+---
+
+## 9. 仍然失败时，请提供这些信息
 
 1. `edge://version` 第一行；
 2. `edge://extensions` 里该扩展的「错误」详情全文；

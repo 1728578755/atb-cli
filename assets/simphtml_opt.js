@@ -4,7 +4,7 @@
 // 另外整个函数套一层 try/catch，异常统一变成 `__ABC_SCAN_ERROR__<msg>` 哨兵，
 // 由 daemon 转成结构化错误，而不是一句通道级 "pageOp failed"。
 //
-// ---- 入口挂载（收口）----
+// ---- 入口挂载----
 // 本文件以前把 optHTML / __abcOptSecret / analyzeNode… 全写成顶层声明：在 classic
 // script 里那是**可枚举**的全局（`Object.keys(window)` 一行就能列出来），正是
 // page_net.js 头部批判过的指纹形态；而 stealth 的 OWN_GLOBALS 只列了 8 个 `__abc*`，
@@ -454,7 +454,7 @@ return __notes.length ? '<!-- scan: ' + __notes.join(' | ') + ' -->\n' + __html 
 // 于是每次把这段脚本注入页面（哪怕只是准备调用 optHTML）都会先对整页做一遍
 // 全量克隆：多付一次秒级开销，还会在页面上留下一次多余的布局读取。
 
-/// 临时全局入口。
+// 临时全局入口。
 ///
 /// 为什么需要它：daemon 的注入脚本是 `<本文件>\nreturn optHTML(false, opts)`，
 /// 两段拼在**同一个脚本**里，所以 optHTML 必须是能被裸标识符解析到的绑定。

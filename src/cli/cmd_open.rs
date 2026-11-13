@@ -114,11 +114,11 @@ pub(crate) fn run_launch(args: LaunchArgs) -> Result<()> {
 /// 前进/后退/刷新这类会打断执行上下文的操作：脚本先返回再触发导航，
 /// 避免 daemon 白等到超时。
 ///
-/// 走统一的 [`dispatch_page`] 而不是直接 `POST /exec`：这样 `--tab @1` /
+// 走统一的 [`dispatch_page`] 而不是直接 `POST /exec`：这样 `--tab @1` /
 /// `--tab url:` 的目标解析、`--dry-run` 的「只解析不执行」、`--async` 的 job 提交
 /// 都与其它页面命令同一条路径，不会再出现「back --tab @1 被当成 tab_id 字符串」。
 /// 底层 op 仍是 `exec`——它就是一段 JS，daemon 的目标解析与 job 白名单都按 exec 走。
-/// 导航命令的 HTTP 预算。
+// 导航命令的 HTTP 预算。
 ///
 /// 导航脚本自己只等 `min(5s)`，把 `--timeout` 原样放大成 HTTP 预算会让
 /// `--timeout 600` 的 back/reload 在 daemon 已返回后还干等十分钟。取 `min(30)+5`。
@@ -132,7 +132,7 @@ pub(crate) fn run_navigation_command(
     args: TabOnlyArgs,
     is_async: bool,
 ) -> Result<()> {
-    // 1e300 / NaN 能通过 `is_finite` 之外的宽松校验并让 Duration 构造 panic。
+    // 1e300 / NaN 能通过 `is_finite()` 之外的宽松校验并让 Duration 构造 panic。
     if !args.timeout.is_finite() || args.timeout <= 0.0 || args.timeout > 3600.0 {
         return Err(usage_failure(
             "invalid_timeout",
@@ -160,7 +160,7 @@ pub(crate) fn run_navigation_command(
     if let Err(problem) = finalize_page_payload("exec", &mut payload) {
         return usage_error(&problem);
     }
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan("exec", &payload, is_async)? {
         return Ok(());
     }
@@ -225,7 +225,20 @@ fn open_target_problem(err: crate::open_target::OpenTargetError) -> preflight::P
         .unwrap_or_default();
     let mut hint = match err.code {
         "unsupported_scheme" => {
-            "只支持 http / https / file 与本地文件路径；其它协议请先在浏览器里打开".to_string()
+            // chrome-extension 已经支持；其余浏览器保留页面只能手动打开。
+            err.details
+                .get("hint")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    "只支持 http / https / file / chrome-extension 与本地文件路径；\
+                     chrome:// / edge:// / about: / devtools:// 页面不能由扩展创建，请手动打开后 `atb tabs` 选择目标"
+                        .to_string()
+                })
+        }
+        "invalid_extension_url" => {
+            "chrome-extension:// 必须带扩展 ID（32 位）与页面路径；其它扩展的页面会被 Chrome 拒绝"
+                .to_string()
         }
         "local_resource_not_found" | "file_not_found" => {
             "确认路径存在；相对路径按当前 shell 的工作目录解析".to_string()
@@ -247,13 +260,18 @@ fn open_target_problem(err: crate::open_target::OpenTargetError) -> preflight::P
     preflight::Problem::new(err.code, err.message, hint).with_field("targets")
 }
 
-/// `--wait-for` 的语法校验。
+// `--wait-for` 的语法校验。
 ///
 /// 旧实现只 `starts_with("selector:")`：`--wait-for 'selector:'` / `'text:   '`
 /// 会被当成合法条件原样下发，daemon 等一个空条件直到超时，用户看到的是
 /// 「打开超时」。现在只接受四类，且 `selector:`/`text:` 的值 trim 后不能为空。
 fn validate_wait_for(cond: &str) -> std::result::Result<(), String> {
-    if cond == "networkidle" || cond == "dom-quiet" {
+    let normalized = cond.trim().to_ascii_lowercase();
+    // none / off / skip 表示「打开后不等待」。
+    if matches!(normalized.as_str(), "none" | "off" | "skip") {
+        return Ok(());
+    }
+    if normalized == "networkidle" || normalized == "dom-quiet" {
         return Ok(());
     }
     if let Some(value) = cond.strip_prefix("selector:") {
@@ -306,7 +324,17 @@ pub(crate) fn cmd_open(args: OpenArgs, is_async: bool) -> Result<()> {
             return Err(usage_failure(
                 "invalid_argument",
                 format!("--wait-for {reason}"),
-                "支持 networkidle / dom-quiet / selector:<CSS选择器> / text:<页面文本>，例如 --wait-for 'selector:.result'",
+                "支持 none / off / skip（不等待）、networkidle / dom-quiet / selector:<CSS选择器> / text:<页面文本>，例如 --wait-for 'selector:.result'",
+            ));
+        }
+    }
+    // `--wait-for-timeout` 是独立预算，必须与 --timeout 同口径校验。
+    if let Some(timeout) = args.wait_for_timeout {
+        if !timeout.is_finite() || timeout < 0.5 || timeout > 3600.0 {
+            return Err(usage_failure(
+                "invalid_argument",
+                "--wait-for-timeout 必须是 0.5~3600 之间的有限秒数",
+                "普通页面的默认预算跟随 --timeout；chrome:// / chrome-extension:// 等特殊页面默认 3s（ATB_OPEN_SPECIAL_WAIT_SEC）",
             ));
         }
     }
@@ -368,15 +396,36 @@ pub(crate) fn cmd_open(args: OpenArgs, is_async: bool) -> Result<()> {
     } else {
         args.challenge_timeout.max(0.0)
     };
-    let request_timeout = http_budget(args.timeout + challenge_budget + 10.0).max(30.0);
-    // `--wait-for` 的等待预算独立成字段（默认 = --timeout），CLI 与服务端
-    // 按同一字段计算；以前只有 CLI 侧用 args.timeout 估算，两边口径不一致。
-    let wait_for_timeout = args.timeout.max(0.0);
-    let request_timeout = if args.wait_for.is_some() {
-        (request_timeout + wait_for_timeout).max(30.0)
+    // `--wait-for` 的等待预算独立成字段（普通页面默认 = --timeout），
+    // CLI 与服务端按同一字段计算；以前只有 CLI 侧用 args.timeout 估算。
+    //
+    // `none/off/skip` 不产生等待预算；特殊页面（chrome:// /
+    // chrome-extension:// / about: / edge:// / devtools://）未显式给预算时用
+    // ATB_OPEN_SPECIAL_WAIT_SEC，而不是 --timeout 的默认 10s。
+    let wait_cond = args
+        .wait_for
+        .as_deref()
+        .map(str::trim)
+        .filter(|cond| !cond.is_empty());
+    let skip_wait = wait_cond
+        .is_some_and(|cond| matches!(cond.to_ascii_lowercase().as_str(), "none" | "off" | "skip"));
+    let special_target = args
+        .targets
+        .iter()
+        .any(|target| crate::open_target::is_special_page(target.trim()));
+    let wait_budget = if skip_wait {
+        0.0
+    } else if let Some(timeout) = args.wait_for_timeout {
+        timeout
+    } else if special_target {
+        crate::settings::open_special_wait_sec()
     } else {
-        request_timeout
+        args.timeout.max(0.0)
     };
+    let mut request_timeout = http_budget(args.timeout + challenge_budget + 10.0).max(30.0);
+    if wait_cond.is_some() && !skip_wait {
+        request_timeout = (request_timeout + wait_budget).max(30.0);
+    }
     let payload = json!({
         // 目标统一走 targets 数组：daemon 内部并发，一个请求开完所有标签页。
         "targets": args.targets,
@@ -397,8 +446,9 @@ pub(crate) fn cmd_open(args: OpenArgs, is_async: bool) -> Result<()> {
         // 与 deny_unknown_fields 互斥， 收口时已合并）；旧字段不动，
         // 旧版 daemon 收到多余字段会忽略，天然向后兼容。
         "wait_for": args.wait_for,
-        // 等待预算显式下发，默认与 readiness_timeout 相同。
-        "wait_for_timeout": wait_for_timeout,
+        // 只有显式给了才下发；缺省由 daemon 决定（普通页面 = readiness_timeout，
+        // 特殊页面 = ATB_OPEN_SPECIAL_WAIT_SEC）。
+        "wait_for_timeout": args.wait_for_timeout,
         "warm": args.warm,
     });
     print_json(request("POST", "/open", Some(payload), request_timeout)?);
@@ -496,6 +546,7 @@ pub(crate) fn cmd_close(args: CloseArgs, is_async: bool) -> Result<()> {
         TargetSpec::Index(_)
         | TargetSpec::Group(_)
         | TargetSpec::Window(_)
+        | TargetSpec::Latest
         | TargetSpec::Current => {
             // 序号 / 标签组 / 窗口 / 当前标签都要 daemon 解析：先拿一次列表按同样顺序
             // 换算成 id。`window:` / `current` 以前被原样透传成 tab_id（`close --tab
@@ -1003,7 +1054,7 @@ fn identity_parts(identity: &str) -> (String, String) {
 
 /// 身份是否确实是「本机的 atb daemon」。
 ///
-/// 旧兜底是「命令行同时含 atb 与 daemon」的纯子串匹配，`/opt/atb-monitor/daemon`、
+// 旧兜底是「命令行同时含 atb 与 daemon」的纯子串匹配，`/opt/atb-monitor/daemon`、
 /// `my-atb-daemon-watchdog`、`catb-daemon` 都会被判成自己的 daemon 并强杀。
 /// strict（默认）收紧为「进程名 == current_exe().file_name() 且参数含独立词 daemon」；
 /// loose 保留旧判据，供自动化救援场景显式开启。
@@ -1274,7 +1325,7 @@ pub(crate) fn cmd_restart(args: RestartArgs, is_async: bool) -> Result<()> {
         }));
         return Ok(());
     }
-    // 旧实现（自锁， 实测反馈）：daemon 活着但 token 不匹配时，/shutdown 被 401
+    // 旧实现（自锁，P0 实测反馈）：daemon 活着但 token 不匹配时，/shutdown 被 401
     // 拒绝并被 `let _` 吞掉，旧 daemon 继续占着 18767；随后带 token 的 /health 也以
     // 「结束占用 18767 的进程后重试」失败——可 restart 本身就是用来解这个局的，
     // 让调用方「重试 restart」是死循环。现在先显式探测这种状态：
@@ -1342,4 +1393,29 @@ fn force_if_running(args: &RestartArgs) -> Result<Option<Value>> {
         "attempts": outcomes.iter().map(KillOutcome::to_json).collect::<Vec<_>>(),
     });
     Ok(Some(report))
+}
+
+#[cfg(test)]
+mod wait_for_validation_tests {
+    use super::validate_wait_for;
+
+    // `--wait-for none|off|skip`（大小写不敏感）必须在 CLI 侧通过。
+    #[test]
+    fn wait_for_none_variants_pass_validation() {
+        for cond in ["none", "off", "skip", " NONE ", "Skip"] {
+            assert!(validate_wait_for(cond).is_ok(), "cond: {cond:?}");
+        }
+    }
+
+    /// 旧条件保持原语义；空 selector/text 仍在 CLI 侧拒绝（exit 2）。
+    #[test]
+    fn wait_for_conditions_keep_old_validation() {
+        assert!(validate_wait_for("networkidle").is_ok());
+        assert!(validate_wait_for("dom-quiet").is_ok());
+        assert!(validate_wait_for("selector:.result").is_ok());
+        assert!(validate_wait_for("text:登录成功").is_ok());
+        assert!(validate_wait_for("selector:   ").is_err());
+        assert!(validate_wait_for("text:").is_err());
+        assert!(validate_wait_for("bogus").is_err());
+    }
 }

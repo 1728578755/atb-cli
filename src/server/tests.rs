@@ -1,7 +1,7 @@
 use super::*;
 use axum::http::HeaderValue;
 
-/// 测试用下行队列容量（之后通道有界）：给足空间，只有专门测背压的
+// 测试用下行队列容量：给足空间，只有专门测背压的
 /// 用例才会用小容量把队列填满。
 const TEST_WS_QUEUE: usize = 64;
 
@@ -152,7 +152,7 @@ fn ws_trust_enforces_identity_only_when_configured() {
     assert_eq!(full.token_value(), Some("secret"));
 }
 
-/// §4.4：坏 JSON 与**空内容**都必须变成 `Corrupt`，绝不能退化成「未配置」
+/// N3-02 / §4.4：坏 JSON 与**空内容**都必须变成 `Corrupt`，绝不能退化成「未配置」
 /// （= 任意扩展可连）。
 #[test]
 fn parse_ws_trust_accepts_valid_json() {
@@ -211,7 +211,7 @@ fn parse_ws_trust_rejects_corrupt_json() {
     }
 }
 
-/// `/reload-trust` 的判定核心——只踢掉白名单外的人，兼容模式不踢。
+/// N3-04：`/reload-trust` 的判定核心——只踢掉白名单外的人，兼容模式不踢。
 #[test]
 fn reload_trust_revokes_only_untrusted_extensions() {
     let trusted = WsTrustState::Ok(WsTrust {
@@ -347,7 +347,7 @@ fn ws_conn_guard_unregisters_on_drop() {
     );
 }
 
-/// challenge 的外层 `ok` 必须等于业务结论，且 `result` 内部结构不动。
+/// N3-06：challenge 的外层 `ok` 必须等于业务结论，且 `result` 内部结构不动。
 #[test]
 fn challenge_envelope_mirrors_inner_ok() {
     // 超时：内层 ok=false → 外层也必须 false，并带出 error_code。
@@ -383,7 +383,7 @@ fn challenge_envelope_mirrors_inner_ok() {
     assert!(failed.get("result").is_none());
 }
 
-/// 卡死阈值必须同时满足「不误伤正常长命令」与「晚于正常空闲」。
+/// N3-07：卡死阈值必须同时满足「不误伤正常长命令」与「晚于正常空闲」。
 #[test]
 fn inflight_stall_threshold_has_a_floor() {
     let mut state = test_state();
@@ -451,7 +451,7 @@ fn handshake_query_token_is_parsed_and_decoded() {
 
 /// 两段式变更观察的「线上契约」：`tests/mock_extension.mjs` 靠
 /// `__abcMonitor__` 与 `status: 'watching'` 这两处字面量识别脚本并回包，
-/// 改动这两个哨兵必须同步改 mock，否则 的守卫会红得莫名其妙。
+// 改动这两个哨兵必须同步改 mock，否则 的守卫会红得莫名其妙。
 #[test]
 fn monitor_scripts_keep_their_wire_contract() {
     let start = monitor_start_script("monitor-1");
@@ -472,7 +472,7 @@ fn monitor_scripts_keep_their_wire_contract() {
     assert!(stop.contains("\"monitor-1\""), "令牌不匹配时判 superseded");
 }
 
-/// `track_inflight` 必须是最外层（401 也计入在途、请求结束后
+/// ：`track_inflight` 必须是最外层（401 也计入在途、请求结束后
 /// 计数归零），但 401/403 属于「鉴权失败」**不是业务活动**，不能续期
 /// `last_activity`——否则拿着旧 token 的进程每次轮询都能把空闲计时清零。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -527,12 +527,12 @@ async fn unauthorized_api_request_is_tracked_and_released() {
     );
     assert!(
         probe.last_activity.lock().await.elapsed() >= Duration::from_secs(55),
-        "401 是鉴权失败不是业务活动：不能续期 last_activity（CQ-07）"
+        "401 是鉴权失败不是业务活动：不能续期 last_activity"
     );
     server.abort();
 }
 
-/// 未授权请求必须被鉴权层短路，**既不能占位也不能写幂等缓存**。
+// 未授权请求必须被鉴权层短路，**既不能占位也不能写幂等缓存**。
 ///
 /// 旧层序是 `idempotency_replay` 在 `require_api_access` 外层：无 token 的 POST
 /// 先占位、401 被当成可回放结果缓存，随后带正确 token 的同 key 请求直接回放
@@ -740,7 +740,7 @@ async fn api_router_enforces_token_and_origin_checks() {
     assert_eq!(responses.3 .1["running"], true);
 }
 
-/// `/reload-trust` 必须落在 API 鉴权层内，且回包报告检查了多少条连接。
+/// N3-04：`/reload-trust` 必须落在 API 鉴权层内，且回包报告检查了多少条连接。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reload_trust_requires_token_and_reports_checked() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1012,7 +1012,7 @@ fn exec_registry_tracks_and_clears_entries() {
     assert!(registry.active.is_empty());
 }
 
-/// 淘汰必须按「完成时间升序」，而不是 HashMap 的迭代顺序。
+/// C-05：淘汰必须按「完成时间升序」，而不是 HashMap 的迭代顺序。
 /// 旧实现 `values().take(20)` 会随机删掉刚完成、正等 `job wait` 的新任务。
 #[test]
 fn job_store_evicts_oldest_finished_jobs() {
@@ -1025,6 +1025,7 @@ fn job_store_evicts_oldest_finished_jobs() {
             started_at: Some(created_at),
             finished_at,
             elapsed_ms: 0,
+            last_heartbeat_ms: 0,
             result: None,
             error: None,
             session_key: None,
@@ -1061,7 +1062,7 @@ fn job_store_evicts_oldest_finished_jobs() {
     assert!(store.jobs.contains_key("job-119"));
 }
 
-/// 的另一半：全是 Running 时表也必须有硬上限，且淘汰最旧的。
+/// C-05 的另一半：全是 Running 时表也必须有硬上限，且淘汰最旧的。
 #[test]
 fn job_store_stays_bounded_when_all_jobs_are_running() {
     let mut store = JobStore::default();
@@ -1077,6 +1078,7 @@ fn job_store_stays_bounded_when_all_jobs_are_running() {
                 started_at: Some(index as f64),
                 finished_at: None,
                 elapsed_ms: 0,
+                last_heartbeat_ms: 0,
                 result: None,
                 error: None,
                 session_key: None,
@@ -1228,7 +1230,7 @@ fn net_hook_name_is_profile_scoped_and_stable() {
     assert_eq!(a, "__net_hook_dfbead77ec260ece");
 }
 
-/// `--browser Edge` 同时命中 `Edge` 与 `Edge-Beta` 时必须报歧义，
+// `--browser Edge` 同时命中 `Edge` 与 `Edge-Beta` 时必须报歧义，
 /// 而不是按 default → latest → connected_at 静默挑一个。
 #[test]
 fn browser_label_ambiguity_is_reported_not_guessed() {
@@ -1266,7 +1268,7 @@ fn agent_identity_header_shape_is_validated() {
     assert!(!is_valid_agent_id(&"a".repeat(81)));
 }
 
-/// `ext_ready.restartSeq` 必须能被取出来；字段缺失/类型不对时当作没上报。
+// `ext_ready.restartSeq` 必须能被取出来；字段缺失/类型不对时当作没上报。
 #[test]
 fn restart_seq_is_parsed_from_ext_ready() {
     assert_eq!(
@@ -1323,7 +1325,7 @@ fn multi_browser_hint_requires_two_browsers_and_implicit_target() {
 }
 
 // ---------------------------------------------------------------------------
-// 补充用例
+// / / / 补充用例
 // ---------------------------------------------------------------------------
 
 /// 构造一条指定下行通道的测试会话（`insert_test_session` 自己建通道，覆盖不到
@@ -1374,7 +1376,7 @@ fn registry_with(keys: &[String]) -> std::sync::Mutex<HashSet<String>> {
     std::sync::Mutex::new(set)
 }
 
-/// 会话已被新连接（conn 2）接管时，conn 1 送来的 Result 必须被丢弃，
+// 会话已被新连接（conn 2）接管时，conn 1 送来的 Result 必须被丢弃，
 /// 而且**不能**把 pending 取走——否则真正属于 conn 2 的结果永远没有接收者，
 /// 调用方只能拿到泛化的 RecvError。
 #[tokio::test]
@@ -1437,7 +1439,7 @@ async fn late_result_from_stale_generation_keeps_pending() {
     );
 }
 
-/// refresh 路径可能以 `conn_id = 0` 登记会话。旧判据
+/// ：refresh 路径可能以 `conn_id = 0` 登记会话。旧判据
 /// `conn_id != 0` 直接 continue，这类会话永远清不掉（`/health.ready` 谎报、
 /// 空闲自杀判不出来）。现在必须按 sender 兜底。
 #[tokio::test]
@@ -1488,7 +1490,7 @@ async fn disconnect_cleanup_falls_back_to_sender_for_zero_conn_id() {
     cleanup_conn_sessions(&state, 7, &sender, &registry).await;
 }
 
-/// 的反向断言：不同通道的 `conn_id = 0` 会话不能误伤
+// 的反向断言：不同通道的 `conn_id = 0` 会话不能误伤
 /// （sender 兜底必须真的比对通道，而不是「0 就清」）。
 #[tokio::test]
 async fn disconnect_cleanup_skips_zero_conn_id_other_sender() {
@@ -1516,7 +1518,7 @@ async fn disconnect_cleanup_skips_zero_conn_id_other_sender() {
     );
 }
 
-/// 关机清理必须 drain 在途 oneshot（给结构化错误）、
+/// ：关机清理必须 drain 在途 oneshot（给结构化错误）、
 /// 把 running job 标成 daemon_shutdown 终态，且重复调用保持幂等。
 #[tokio::test]
 async fn shutdown_cleanup_drains_pending_and_aborts_running_jobs() {
@@ -1545,6 +1547,7 @@ async fn shutdown_cleanup_drains_pending_and_aborts_running_jobs() {
                 started_at: None,
                 finished_at: None,
                 elapsed_ms: 0,
+                last_heartbeat_ms: 0,
                 result: None,
                 error: None,
                 session_key: None,
@@ -1576,7 +1579,7 @@ async fn shutdown_cleanup_drains_pending_and_aborts_running_jobs() {
     assert_eq!(again["skipped"], json!(true));
 }
 
-/// 握手信任档位（纯函数）。默认 compat 必须保持旧行为，其余三档
+// 握手信任档位（纯函数）。默认 compat 必须保持旧行为，其余三档
 /// fail-closed 且拒绝原因带稳定 error_code。
 #[test]
 fn ws_handshake_trust_modes_enforce_identity() {
@@ -1634,10 +1637,10 @@ fn ws_handshake_trust_modes_enforce_identity() {
 }
 
 // ---------------------------------------------------------------------------
-// 补充用例
+// / / 补充用例
 // ---------------------------------------------------------------------------
 
-/// 下行队列有界。满了必须给出 `ws_backpressure`（可重试），
+// 下行队列有界。满了必须给出 `ws_backpressure`（可重试），
 /// 对端关闭必须给出 `ws_disconnected`——两者都不能是"静默丢弃"或"无限等待"。
 #[tokio::test]
 async fn send_downstream_reports_backpressure_and_disconnect() {
@@ -1671,7 +1674,7 @@ async fn send_downstream_reports_backpressure_and_disconnect() {
     );
 }
 
-/// WS 入站 90s 静默判定的纯函数。定时分支与单测共用同一个判据，
+// WS 入站 90s 静默判定的纯函数。定时分支与单测共用同一个判据，
 /// 不会出现"测的和跑的两条线"。
 #[test]
 fn inbound_silence_turns_half_open_only_after_ninety_seconds() {
@@ -1685,7 +1688,7 @@ fn inbound_silence_turns_half_open_only_after_ninety_seconds() {
     assert!(inbound_is_half_open(Duration::from_secs(91)));
 }
 
-/// `ws_hello` 的 proof 必须能用"配置里的 token"复算出来，
+// `ws_hello` 的 proof 必须能用"配置里的 token"复算出来，
 /// 且没配 token 时 `auth_required:false` + `proof:null`。
 #[test]
 fn ws_hello_proves_token_possession() {
@@ -1729,11 +1732,11 @@ fn ws_hello_proves_token_possession() {
     }
 }
 
-/// 线协议固定向量：锁住 `nonce|extension_id` 的**拼接顺序与分隔符**。
+// 线协议固定向量：锁住 `nonce|extension_id` 的**拼接顺序与分隔符**。
 ///
 /// 上面的 `ws_hello_proves_token_possession` 是自证（同一份 HMAC 算自己拼的串），
 /// 改分隔符/换顺序也测不出来。这条用固定 nonce 断言一条与三方对拍过的完整 proof：
-/// `src/hmac.rs` ↔ Node/OpenSSL `createHmac` ↔ 扩展 WebCrypto（`tests/extension_closeout.test.mjs`
+/// `src/hmac.rs` ↔ Node/OpenSSL `createHmac` ↔ 扩展 WebCrypto（`tests/closeout_ext.test.mjs`
 /// 里固化的 known-answer 是同一条向量）。任一侧改了 hex 大小写、补零或拼接格式，
 /// Rust 侧与 JS 侧会同时红，不必等真机。
 #[test]
@@ -1761,7 +1764,7 @@ fn ws_hello_wire_vector_matches_the_extension_known_answer() {
     );
 }
 
-/// 空闲退出判定的单轮驱动（直接用生产函数 `idle_tick`）。
+// 空闲退出判定的单轮驱动（直接用生产函数 `idle_tick`）。
 ///
 /// 覆盖三条必须成立的语义：有扩展连接不退、有在途请求不退、都没有时走完
 /// 宽限期才退。
@@ -1837,7 +1840,7 @@ async fn idle_tick_keeps_running_until_nothing_is_connected() {
     ));
 }
 
-/// `cleanup_conn_sessions` 重复调用必须幂等，且只收拾"本连接登记的"会话。
+// `cleanup_conn_sessions` 重复调用必须幂等，且只收拾"本连接登记的"会话。
 #[tokio::test]
 async fn cleanup_conn_sessions_is_idempotent_and_owner_scoped() {
     let state = test_state();
@@ -1893,7 +1896,7 @@ async fn cleanup_conn_sessions_is_idempotent_and_owner_scoped() {
         .contains_key(&foreign_key));
 }
 
-/// 连接已经收尾（登记表里没有它）之后才到的 tabs 快照，落库必须是
+// 连接已经收尾（登记表里没有它）之后才到的 tabs 快照，落库必须是
 /// **已断开**，不能插成 active 的幽灵会话——否则 daemon 永不空闲退出。
 #[tokio::test]
 async fn snapshot_from_a_closed_connection_is_stored_as_disconnected() {
@@ -1997,7 +2000,7 @@ async fn idempotency_failing_probe() -> Response {
         .into_response()
 }
 
-/// 失败响应不能进缓存，同 key 重发必须真的重跑
+/// ：失败响应不能进缓存，同 key 重发必须真的重跑
 /// （否则幂等键会变成"永久失败锁"）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotency_does_not_cache_error_responses() {
@@ -2053,7 +2056,7 @@ async fn idempotency_slow_probe() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
-/// 同一个 key 并发时，只有首个请求真正执行，第二个等它的
+/// ：同一个 key 并发时，只有首个请求真正执行，第二个等它的
 /// 完成通知后回放（不能"两个都执行一次"）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotency_concurrent_same_key_executes_once() {
@@ -2104,7 +2107,7 @@ async fn idempotency_concurrent_same_key_executes_once() {
     server.abort();
 }
 
-/// 首个请求被取消（客户端断开、task abort）时，
+/// /：首个请求被取消（客户端断开、task abort）时，
 /// `Pending` 占位必须由 Drop 守卫释放，否则同 key 会被永久钉在 504 上。
 #[tokio::test]
 async fn idempotency_pending_slot_is_released_when_the_lead_is_cancelled() {

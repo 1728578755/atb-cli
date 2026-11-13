@@ -43,7 +43,7 @@ pub(crate) fn usage_failure(
 ///
 /// 有些误用是「把子命令名当成了位置参数」（`atb download list`），只给文案和 hint
 /// 调用方仍要自己找正确命令；把替代命令结构化地放在 `did_you_mean` 里，
-/// 预检信息就能直接被复用（体验项）。
+// 预检信息就能直接被复用。
 pub(crate) fn usage_failure_with_suggestion(
     code: &str,
     message: impl Into<String>,
@@ -104,7 +104,7 @@ pub(crate) fn report_failure(err: &anyhow::Error) -> i32 {
             Some(usage.hint.clone()),
             usage.suggestion.clone(),
         ),
-        // HTTP 层失败带结构化 code/hint（17）：直接把稳定码透出去，
+        // HTTP 层失败带结构化 code/hint：直接把稳定码透出去，
         // 否则会被兜底成 unexpected_error，调用方就分不清 token 失配与环境故障。
         None => match err.downcast_ref::<HttpFailure>() {
             Some(failure) => (
@@ -190,8 +190,11 @@ pub(crate) fn print_json(mut value: Value) {
         if value.get("error_code").is_none() {
             if text.contains("exec_timeout") {
                 // exec/action 超时不代表结果丢失，扩展可能稍后才回包。
-                // exec_id 由 daemon 附在 error 文本里，5 分钟内可查询。
-                value["hint"] = json!("结果可能已通过 GET /exec-result/<exec_id> 查询（5 分钟内有效），exec_id 见 error 字段");
+                // exec_id 由 daemon 附在 error 文本里；保留时长可配（默认 1 小时）。
+                let ttl = crate::settings::exec_result_ttl_sec();
+                value["hint"] = json!(format!(
+                    "结果不会丢：exec_id 见 error 字段，用 `atb job result <exec_id> --wait 60` 取回（daemon 保留 {ttl} 秒，可用 ATB_EXEC_RESULT_TTL_SEC 调整）"
+                ));
             } else if text.trim_start().starts_with("outcome_unknown") {
                 // 旧 daemon 只给文案前缀（`server/action.rs` 的 Display）：补结构化码，
                 // 让 exec/click 等动作类命令统一走退出码 4，而不是被当成可重试的 1。
@@ -234,6 +237,8 @@ pub(crate) fn print_json(mut value: Value) {
         };
         FAILURE_EXIT_CODE.store(code, Ordering::Relaxed);
     }
+    // 2026-11-13：把「当前操作的是哪个浏览器」提示到 stderr，不污染 stdout JSON。
+    maybe_print_browser_banner(&value);
     let text = if PRETTY_OUTPUT.load(Ordering::Relaxed) {
         serde_json::to_string_pretty(&value)
     } else {
@@ -243,11 +248,72 @@ pub(crate) fn print_json(mut value: Value) {
     write_stdout(&text);
 }
 
+// 在 stderr 提示当前浏览器身份，避免「以为是 Chrome，实际在 Edge」这类误判。
+///
+/// - `ATB_BROWSER_BANNER=off`：不提示；`always`：每条命令都提示；
+/// - `once`（默认）：同一 agent + 同一浏览器 10 分钟内只提示一次，状态存
+///   `~/.atb/banner.json`（写失败只影响提示，不影响命令）。
+///
+/// stdout 的 JSON 完全不变，stderr 是给人看的。
+fn maybe_print_browser_banner(value: &Value) {
+    let mode = crate::settings::browser_banner();
+    if mode == "off" {
+        return;
+    }
+    let browser = value
+        .get("browser")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/result/browser").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .pointer("/resolved_target/browser")
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let Some(browser) = browser else {
+        return;
+    };
+    let agent = AGENT_ID.get().map(String::as_str).unwrap_or("default");
+    let state_path = config::user_config_dir()
+        .ok()
+        .map(|dir| dir.join("banner.json"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    if mode == "once" {
+        if let Some(path) = state_path.as_ref() {
+            if let Ok(raw) = fs::read_to_string(path) {
+                if let Ok(state) = serde_json::from_str::<Value>(&raw) {
+                    let same_agent = state.get("agent").and_then(Value::as_str) == Some(agent);
+                    let same_browser =
+                        state.get("browser").and_then(Value::as_str) == Some(browser);
+                    let at = state.get("at").and_then(Value::as_u64).unwrap_or(0);
+                    if same_agent && same_browser && now.saturating_sub(at) < 600 {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("→ 正在操作：{browser}");
+    if mode == "once" {
+        if let Some(path) = state_path {
+            let body = json!({ "agent": agent, "browser": browser, "at": now });
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(path, body.to_string());
+        }
+    }
+}
+
 /// 这些 error_code 表示「命令写错了」，对应退出码 2。
 ///
 /// 判据是**结构优先、白名单兜底**：先按命名约定认前缀，再列那些不符合约定的历史码。
 /// 以前只有白名单，新增一个 `invalid_frame` / `unsupported_world` 而忘了登记，就会
-/// 静默落到退出码 1（= 可重试），Agent 于是反复重试一条本来就写错的命令（v8）。
+// 静默落到退出码 1（= 可重试），Agent 于是反复重试一条本来就写错的命令。
 ///
 /// 反例：`idempotency_in_flight_timeout` **不要**加进白名单——它表示首次请求仍在执行、
 /// 稍后可重试，属于执行失败（退出码 1）。
@@ -267,6 +333,8 @@ pub(crate) fn is_usage_error_code(code: &str) -> bool {
     matches!(
         code,
         "file_not_found"
+            // 2026-11-13：注入/exec 的本地语法预检失败，改脚本即可。
+            | "syntax_error"
             | "output_path_collision"
             | "target_out_of_range"
             | "target_not_found"

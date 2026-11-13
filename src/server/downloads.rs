@@ -234,7 +234,7 @@ pub(crate) async fn downloads_value(state: &AppState, req: DownloadsRequest) -> 
         if let Some(url) = req.url {
             payload["url"] = json!(url);
         }
-        // 文件名在 daemon 侧就净化（daemon 侧对应项）：
+        // 文件名在 daemon 侧就净化：
         // 旧实现原样拼进 `${dir}/${fileName}` 交给扩展，只剩 Chrome 兜底，
         // `--filename ../../x` 会写到下载目录之外。
         let mut filename_note: Option<Value> = None;

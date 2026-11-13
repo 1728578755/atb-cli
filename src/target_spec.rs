@@ -28,6 +28,11 @@ pub enum TargetSpec {
     All,
     /// 浏览器当前激活的标签页。
     Current,
+    /// 最近打开 / 最近连接的标签页（`@latest`）。
+    ///
+    /// `@1` 是「tabs 列表第 1 个」，在 100+ 标签的浏览器里几乎不可能等于
+    // 「我刚打开的那个」；`@latest` 才有稳定语义。
+    Latest,
     /// `tabs` 输出里的 1-based 序号。
     Index(Vec<usize>),
     /// URL 子串（大小写不敏感）。
@@ -75,6 +80,7 @@ impl TargetSpec {
         match lower.as_str() {
             "all" | "*" => return Ok(TargetSpec::All),
             "current" | "active" => return Ok(TargetSpec::Current),
+            "latest" | "@latest" | "#latest" => return Ok(TargetSpec::Latest),
             _ => {}
         }
         if let Some(rest) = strip_prefix_ci(text, "url:") {
@@ -157,7 +163,7 @@ impl TargetSpec {
         }
         // 去重按原顺序（保留首次出现）：`--tab 5,5` 只该命中一个标签页，否则同一条
         // 命令会对同一个页面执行两遍（点击两次、填两次）。daemon 侧已有去重，这里是
-        // 双保险。
+        // 双保险（D-07）。
         Ok(TargetSpec::Ids(dedupe(ids)))
     }
 
@@ -171,6 +177,7 @@ impl TargetSpec {
             self,
             TargetSpec::All
                 | TargetSpec::Current
+                | TargetSpec::Latest
                 | TargetSpec::Index(_)
                 | TargetSpec::Url(_)
                 | TargetSpec::Title(_)
@@ -182,7 +189,7 @@ impl TargetSpec {
     /// 是否可能打到多个标签页（决定 `--async` 是否可用）。
     pub fn is_multi(&self) -> bool {
         match self {
-            TargetSpec::Default | TargetSpec::Current => false,
+            TargetSpec::Default | TargetSpec::Current | TargetSpec::Latest => false,
             TargetSpec::All
             | TargetSpec::Url(_)
             | TargetSpec::Title(_)
@@ -211,6 +218,7 @@ impl TargetSpec {
             TargetSpec::Default => "default".to_string(),
             TargetSpec::All => "all".to_string(),
             TargetSpec::Current => "current".to_string(),
+            TargetSpec::Latest => "@latest".to_string(),
             TargetSpec::Index(values) => {
                 let list: Vec<String> = values.iter().map(|v| format!("@{v}")).collect();
                 list.join(",")
@@ -220,7 +228,7 @@ impl TargetSpec {
             TargetSpec::Group(value) => format!("group:{value}"),
             TargetSpec::Window(value) => format!("window:{value}"),
             // 回显时对「会被语法抢走」的 id 加 `id:` 前缀，保证 `describe()` 的输出
-            // 再喂回 `parse` 得到同一个规格。
+            // 再喂回 `parse()` 得到同一个规格。
             TargetSpec::Ids(ids) => ids
                 .iter()
                 .map(|id| {
@@ -360,7 +368,10 @@ fn dedupe<T: PartialEq>(items: Vec<T>) -> Vec<T> {
 }
 
 fn parse_index(raw: &str) -> Result<usize, SpecError> {
-    let value = raw.trim().parse::<usize>().map_err(|_| SpecError {
+    // `@1,@2`：整个字符串只剥一次前导 `@` 后，第二个 token 仍是 `@2`；
+    // 这里逐个 token 再剥一次，`@1,@3` 与 `@1-@3` 才能按文档工作。
+    let raw = raw.trim().trim_start_matches(['@', '#']);
+    let value = raw.parse::<usize>().map_err(|_| SpecError {
         code: "invalid_target_spec",
         message: format!("--tab @{raw} 不是有效序号"),
         hint: "序号必须是 1 起的整数（`@1`、`@1,@2`、`@1-3`）".to_string(),
@@ -464,6 +475,19 @@ mod tests {
         assert_eq!(
             TargetSpec::parse("@1,3").unwrap(),
             TargetSpec::Index(vec![1, 3])
+        );
+        // 文档写法是 `@1,@3`：第二个 token 自带 `@`，必须也能解析。
+        assert_eq!(
+            TargetSpec::parse("@1,@3").unwrap(),
+            TargetSpec::Index(vec![1, 3])
+        );
+        assert_eq!(
+            TargetSpec::parse("@1-@3").unwrap(),
+            TargetSpec::Index(vec![1, 2, 3])
+        );
+        assert_eq!(
+            TargetSpec::parse("#2,#4").unwrap(),
+            TargetSpec::Index(vec![2, 4])
         );
         assert!(TargetSpec::parse("@3-1").is_err());
         assert!(TargetSpec::parse("@x").is_err());

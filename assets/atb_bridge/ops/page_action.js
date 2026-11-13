@@ -3,8 +3,8 @@
 //
 // 命名约定：本文件的辅助函数一律带 `__abcAct` 前缀（`__abcActVisible` 等）。
 // 与 page_find.js 的同名逻辑**不能共用同一个全局名**：两份脚本都注入同一个
-// world，后注入者会静默覆盖先注入者，于是「只改了其中一份」就变成行为漂移。
-// 语义相同也要各留一份、各叫各的名字。
+// world，后注入者会静默覆盖先注入者，于是「只改了其中一份」就变成行为漂移
+//。语义相同也要各留一份、各叫各的名字。
 //
 // ---- 入口挂载----
 // 扩展侧每次调用前都重新注入本文件（background.js 的 handlePageOp），同一 world
@@ -38,7 +38,7 @@ function __abcActSecretField(el) {
 
 /// 元素总数只量一次：`text=` 定位要在「innerText 精确但会触发布局」和
 /// 「textContent 快但口径宽」之间选一个。大页面上对每个候选读 innerText
-/// 会反复强制整页布局，几十万节点能卡到秒级。
+// 会反复强制整页布局，几十万节点能卡到秒级。
 /// 阈值与 page_wait.js 的 TEXT_INNER_LIMIT 对齐。
 const __ABC_TEXT_INNER_LIMIT = 20000;
 let __abcActNodeCount = null;
@@ -49,7 +49,7 @@ function __abcActTextMode() {
   return __abcActNodeCount <= __ABC_TEXT_INNER_LIMIT ? 'innerText' : 'textContent';
 }
 
-/// ---- shadow DOM 定位----
+// ---- shadow DOM 定位----
 /// find / snapshot 现在会把 open shadow root 里的元素也返回，选择器写成
 /// `"<host 文档路径> >>> <shadow 内相对路径>"`（pierce:true）。动作侧必须认这种
 /// 写法，否则「找到了却点不到」，工具链等于只修了一半。
@@ -336,7 +336,7 @@ function __abcAct(op, target, params) {
       // append 的基准必须是**写入前**的当前值：
       // 旧实现先按默认 clear 清空再读 el.value，于是 `append:true` 实际拿到空串，
       // 行为退化成覆盖，调用方以为追加成功（回包 applied:true），输入框却被清空。
-      // 这里曾经也叫 `base`，把外层的结果对象遮蔽成字符串，后面
+      // v11：这里曾经也叫 `base`，把外层的结果对象遮蔽成字符串，后面
       // `Object.assign(base, ...)` 只是在 String 包装对象上挂属性，序列化后
       // `ok/applied` 全丢 —— fill 明明写成功了，调用方却收到「没有返回结论」。
       const before = String(el.value == null ? '' : el.value);

@@ -204,7 +204,7 @@ atb save-pdf --out page.pdf --paper a4 --landscape
 - 整页截图、元素截图、`save-pdf` **优先**走调试器；页面嵌了别的扩展的 iframe（`page_protected`）时自动回落：
   整页截图变逐屏拼接（`via:"captureFullPageStitched"`），`save-pdf` 变图片型 PDF（`text_selectable:false`），
   元素截图没有回落通道（会报 `page_protected`）。设 `ATB_NO_DEBUGGER=1` 时同理。
-- 长页面用 `--max-height <设备像素>` 限高（默认 20000），超出会截断并标 `truncated:true`；也可以直接选 `--format jpeg --quality 80` 控制体积。
+- 长页面用 `--max-height <设备像素>` 限高：CLI 不传即不截断，扩展整页拼图通道默认上限 20000；超出会截断并标 `truncated:true`；也可以直接选 `--format jpeg --quality 80` 控制体积。
 - 多标签截图必须带 `{tab}` 或 `{index}` 占位符，写法见配方 5。
 - 元素截图前先 `wait --visible --selector '#chart'`，避免截到未渲染区域。
 - 拿到结果先看 `via` / `synthetic`：`captureVisibleTab` 是可见区域、`cdp` 是元素/整页真截图、`stitched*` 是拼接产物。
@@ -225,3 +225,88 @@ atb inject --remove flag
 - `--persist <name>` 命名后，每次页面导航自动重放；`--list` 查看，`--remove` 删除。
 - `--match` 默认 `<all_urls>`，尽量收窄，避免污染无关站点。
 - `--world isolated` 里的变量页面脚本看不到；要影响页面逻辑就用默认 `main`。
+
+## 13. 测试用户脚本（Tampermonkey 兼容）
+
+场景：真实站点上的前端修复脚本不生效，或需要复现 `GM_*` 环境；不改用户已安装的 Tampermonkey 脚本。
+
+```bash
+# 1. 打开目标页并切前台：后台标签会节流定时器，懒加载可能不触发
+atb open https://example.com/app --background
+atb focus --tab @latest
+
+# 2. 先解析元数据，确认 @name / @match / @grant
+atb userscript ./fix.user.js --parse-only
+
+# 3. 按 GM 环境注入，并清掉旧宿主节点
+atb inject --userscript --file ./fix.user.js --gm-namespace fix-demo \
+  --cleanup-selector '#legacy-host' --cleanup-selector '.old-panel'
+
+# 4. 断言效果并截图留证
+atb exec 'return {host: !!document.querySelector("#fix-host"), flag: window.__FIX__ === true}'
+atb screenshot --selector '#fix-host' --wait-selector '#fix-host' --out fix-host.png
+
+# 5. 需要跨导航保留时再 --persist；默认 2 小时过期
+atb inject --userscript --file ./fix.user.js --persist fix-demo --match 'https://example.com/*' \
+  --cleanup-selector '#fix-host'
+atb inject --list
+atb inject --remove fix-demo
+```
+
+注意：
+
+- GM shim 只覆盖 `GM_getValue` / `GM_setValue` / `GM_deleteValue` / `GM_listValues` / `GM_registerMenuCommand` / `GM_log` / `GM_addStyle` / `GM_info` / `unsafeWindow`；`GM_xmlhttpRequest` 会抛「not supported」，`@require` 不会自动加载。
+- 先看 `executed` / `returned` / `threw`：顶层 `ok:false` + `inject_script_threw` 表示脚本已经执行但抛错，副作用可能已发生。
+- 默认 `--persist` 2 小时过期；永久驻留必须 `--persist-forever --i-know-this-is-long-lived`。`--list` 的 `expires_in_sec` 是剩余寿命，`null` 表示永久。
+- 页面已有安装版脚本时会出现两份宿主；用 `--cleanup-selector` 清旧节点，或让用户临时停用安装版。不要靠反复注入「覆盖」旧节点。
+- `userscript <file-or-url>` 只负责打开安装页，不执行脚本；`--parse-only` 用于 CI 或先校验元数据。
+
+## 14. 长任务进度与取回结果
+
+场景：`exec` / `scan` 跑得比 CLI 超时久，既要看进度，又不想丢掉已经算出的结果。
+
+```bash
+# 提交后台任务，记下 job_id
+atb --async exec --file slow.js --timeout 30
+
+# 看进度：每个状态变化输出一行 JSONL
+atb job tail <jobId> --interval 0.5 --timeout 600
+
+# exec 同步超时后，用错误里的 exec_id 取回迟到结果
+atb job result <exec_id> --wait 60
+
+# 任务已经结束时也可以直接查
+atb job get <jobId>
+atb job wait <jobId> --timeout 300
+```
+
+注意：
+
+- `job tail` 的 `stalled:true` 表示心跳超过 `ATB_JOB_STALL_SEC`（默认 60 秒）没更新；终态退出码 `0` / `1` / `130`，跟踪超时是 `3`。
+- `job result` 命中时输出 `{ok:true,found:true,result,...}`；等待窗口内没找到返回 `exec_result_not_found`（`--wait > 0` 时退出码 3）。迟到结果默认保留 3600 秒（`ATB_EXEC_RESULT_TTL_SEC`）。
+- 带副作用的任务（点击、提交）超时后不要直接重发；先用同一个 `--idempotency-key` 或 `job result` 确认。
+- 任务结果只在 daemon 内存里，daemon 重启即丢；要留产物就写 `--out` 文件。
+
+## 15. 截图等待与 CDP 强制
+
+场景：图表 / 懒加载区域还没渲染完就截图，或需要确定性走 CDP、不接受静默回落。
+
+```bash
+# 先让目标可见，再等元素出现、网络静默和额外 settle
+atb focus --tab @latest
+atb screenshot --wait-selector '#chart' --network-idle --settle-ms 200 --out chart.png
+
+# 整页截图：要求必须走 CDP，失败就报 cdp_required
+atb screenshot --full-page --require-cdp --out full.png
+
+# 页面嵌了别的扩展 iframe、CDP 不可用时，显式接受回落
+atb screenshot --full-page --out fallback.png
+```
+
+注意：
+
+- `--network-idle` 不带值表示在途 fetch / XHR 归零后静默 500ms（`ATB_SCREENSHOT_NETWORK_IDLE_MS`）；`--network-idle 800` 覆盖窗口。`--settle-ms` 默认 `ATB_SCREENSHOT_SETTLE_MS`（0）。
+- 结果里 `tab_visible` / `captured_tab.tab_id` 确认实际截到哪个标签；`degraded:true` / `warning` / `warnings` 表示走了 `captureVisibleTab` 或拼接通道。
+- `--require-cdp` 下 CDP 不可用会返回 `cdp_required`，不会静默降级；不需要强约束时去掉它，让截图回落。
+- 整页 `clip_box` 用 CSS px；`--max-height` 仍按设备像素。`position:fixed/sticky` 在 CDP `captureBeyondViewport` 下可能在底部重复，逐屏拼接则每屏重复，这是浏览器渲染限制。
+- 后台标签先 `focus`；`captureVisibleTab` 只能截浏览器前台窗口的激活标签，跨窗口切换会让 `captured_tab` 与目标不一致。

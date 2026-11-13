@@ -1,6 +1,6 @@
 {
   "name": "@g1728578755/atb",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "description": "Agent-oriented browser CLI with multi-tab and multi-agent isolation, backed by a native Rust daemon.",
   "license": "MIT",
   "keywords": [
@@ -43,11 +43,11 @@
     "postinstall": "node npm/postinstall.js"
   },
   "optionalDependencies": {
-    "@g1728578755/atb-darwin-arm64": "0.7.4",
-    "@g1728578755/atb-darwin-x64": "0.7.4",
-    "@g1728578755/atb-linux-x64": "0.7.4",
-    "@g1728578755/atb-linux-arm64": "0.7.4",
-    "@g1728578755/atb-win32-x64": "0.7.4"
+    "@g1728578755/atb-darwin-arm64": "0.8.0",
+    "@g1728578755/atb-darwin-x64": "0.8.0",
+    "@g1728578755/atb-linux-x64": "0.8.0",
+    "@g1728578755/atb-linux-arm64": "0.8.0",
+    "@g1728578755/atb-win32-x64": "0.8.0"
   },
   "engines": {
     "node": ">=18"

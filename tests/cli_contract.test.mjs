@@ -214,7 +214,7 @@ for (const at of exitCalls) {
 // 只认 1/true。2026-11-06 收拢轮把「读取 + 解析」移进 src/settings.rs
 // （exit0_enabled，经 read_env 统一处理旧前缀），cli/mod.rs 只留调用点
 // exit0_compat() -> settings::exit0_enabled()。这里分层锁住四件事：
-// 调用点形状、委托关系、解析语义、旧名回退——少任何一层，（失败却
+// 调用点形状、委托关系、解析语义、旧名回退——少任何一层， （失败却
 // exit 0）或「旧名静默失效」都会复发。
 //
 // 正则必须落在**同一个语义单元**里。旧写法在整个 cli 源码上分别

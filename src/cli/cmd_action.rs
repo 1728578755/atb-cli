@@ -36,7 +36,7 @@ pub(crate) fn run_action_command(op: &str, args: ActionArgs, is_async: bool) -> 
         "profile": args.profile,
         "timeout": args.timeout,
     });
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan(op, &payload, is_async)? {
         return Ok(());
     }
@@ -101,8 +101,12 @@ pub(crate) fn cmd_wait(args: WaitArgs, is_async: bool) -> Result<()> {
         "switch_tab_id": args.tab,
         "browser": args.browser,
         "profile": args.profile,
+        // 0 = 用户写了不带值的 --dom-stable / --network-idle，由 daemon
+        // 按 ATB_WAIT_DOM_STABLE_MS / ATB_SCREENSHOT_NETWORK_IDLE_MS 取默认值。
+        "dom_stable": args.dom_stable,
+        "network_idle": args.network_idle,
     });
-    // dry-run + async 必须在 ensure_server/HTTP 之前短路。
+    // ：dry-run + async 必须在 ensure_server()/HTTP 之前短路。
     if async_dry_run_plan("wait", &payload, is_async)? {
         return Ok(());
     }
@@ -179,7 +183,7 @@ pub(crate) fn cmd_challenge(args: ChallengeArgs, is_async: bool) -> Result<()> {
     }
     // 坐标是纯本地解析（不碰 daemon），dry-run 也要照常校验。
     //
-    // `--at` 以前对所有 action 生效，`challenge status --at 1,2`
+    // v11：`--at` 以前对所有 action 生效，`challenge status --at 1,2`
     // 会在识别阶段意外点一次鼠标（坐标点击是不可撤销的副作用）。只有 click
     // 需要坐标；其它 action 带了就直接判用法错误，而不是静默忽略。
     if args.at.is_some() && action != "click" {
@@ -224,7 +228,7 @@ pub(crate) fn cmd_challenge(args: ChallengeArgs, is_async: bool) -> Result<()> {
         "profile": args.profile,
     });
     // 不传就不下发：让服务端按 action 取默认（wait 30s / solve 120s）。
-    // 否则 CLI 的 30s 默认值会把服务端的 120s 默认值永久压掉。
+    // 否则 CLI 的 30s 默认值会把服务端的 120s 默认值永久压掉（N-04）。
     if let Some(timeout) = args.timeout {
         payload["timeout"] = json!(timeout);
     }
@@ -257,13 +261,13 @@ pub(crate) fn cmd_challenge(args: ChallengeArgs, is_async: bool) -> Result<()> {
     };
     let mut value = request("POST", "/challenge", Some(payload), http_timeout)?;
     // 超时 / 未通过不是成功：把顶层 ok 改成 false，统一由 print_json 的
-    // 「ok:false → 退出码 1」处理，避免这类命令只能靠 cleared/passed 字段判断。
+    // 「ok:false → 退出码 1」处理，避免这类命令只能靠 cleared/passed 字段判断（N-09）。
     if long_running && value.get("ok").and_then(Value::as_bool) == Some(true) {
         // `passed` 是 wait/solve 的主判据，`cleared` 是兜底：wait 的目标就是
         // 「离开挑战页」，而 daemon 曾经只在 solve 分支写 `passed`，于是成功清除
         // 被判成 challenge_timeout。
         //
-        // click 是「派发一次点击」，它不是等待类动作 —— daemon 的 click
+        // v11：click 是「派发一次点击」，它不是等待类动作 —— daemon 的 click
         // 分支只回 `clicked` + `cleared`，没有 `passed`。旧实现用 passed/cleared
         // 判 click，点击成功后 `cleared` 仍为 false（页面不可能一次点击就通过），
         // 于是把成功改写成 challenge_timeout。现在 click 只看 `clicked`，

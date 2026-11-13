@@ -78,7 +78,7 @@ atb cleanup             # 关闭本智能体 open 的标签页
 
 ## 5. 版本配套与升级
 
-三个版本：CLI/daemon 的 API 协议（当前 5）、扩展的消息协议（当前 4）、扩展的文件版本（当前 5.4.2）。
+三个版本：CLI/daemon 的 API 协议（当前 5）、扩展的消息协议（当前 4）、扩展的文件版本（当前 5.5.0）。
 
 ```bash
 atb status | jq '.compatibility'
@@ -150,7 +150,7 @@ atb status | jq '.compatibility'
 
 - 外层给总预算，内层用「剩余时间」：不要把同一个 `Duration` 复用到循环每一轮。
 - 预计超过 30 秒的操作改用 `--async` + `job wait`，把等待从命令行移到 daemon。
-- `job wait` 超时的退出码是 `3`，普通 `wait` 超时是 `1`；脚本按码分支，不要解析文本。
+- `job wait` / `job result` 超时与 `download-wait` 超时的退出码是 `3`，普通 `wait` 超时是 `1`；脚本按码分支，不要解析文本。
 
 ---
 
@@ -241,6 +241,74 @@ atb stealth scrub
 - 切档后跑一次 `atb status`：`security.mode` 与 `security.warning` 会告诉你当前档位；`compat` 一定带告警。
 - 关掉 `ATB_NO_DEBUGGER` 之外的加固：`ATB_NO_DEBUGGER=1` 禁止 attach；`ATB_IDEMPOTENCY_PERSIST=redacted`（默认）确保幂等记录不写响应体。
 - 白名单/token 约束「谁能连 daemon」；配上 token 后握手还有双向鉴权（`ws_hello` + HMAC proof），扩展能验证对端是不是真 daemon；没配 token 时扩展无法验证对端身份，这是默认档的已知边界。
-- 从 Release 手工下载二进制时先核 `SHA256SUMS`（有 `SHA256SUMS.asc` 时再 `gpg --verify`），
+- 从 Release 手工下载二进制时先核 `SHA256SUMS`，
   从 npm 安装时用 `npm audit signatures` 校验 provenance；平台包哈希在 `package-lock.json` 里锁死，
   发布门禁要求与 registry 一致（详见 `SECURITY.md` 的「发布产物校验」）。
+
+---
+
+## 13. 前端测试与用户脚本的五条习惯
+
+### 13.1 先 `focus`，再测懒加载 / 动画
+
+后台标签页会被 Chrome 暂停 `requestAnimationFrame`、降低 `IntersectionObserver` 优先级并节流定时器；`exec` / `screenshot` / `wait` 回包里的 `tab_hidden` / `timers_throttled` 就是在说这件事。
+
+```bash
+atb focus --tab @latest          # 切前台（默认同时聚焦系统窗口）
+atb focus --tab 123 --no-window  # 只激活标签页，不抢窗口
+```
+
+需要「真实可见」才出现的图片 / 列表 / 动画，先 focus 再断言；批量脚本不关心可见性时可用 `ATB_HIDDEN_TAB_WARNING=off` 静音提示，但不要据此认为后台行为与前台一致。
+
+### 13.2 用户脚本注入前先 cleanup
+
+用户脚本经常改同一块 DOM。重复注入会在页面上叠出多份宿主节点，后续断言就会数错。
+
+```bash
+atb inject --userscript --cleanup-selector '#my-panel' --cleanup-selector '.old-widget' \
+  --file script.user.js --tab @latest
+# 或者把清理代码放进文件：
+atb inject --userscript --cleanup-file cleanup.js --file script.user.js
+```
+
+`--cleanup-selector` 可重复；清理失败只记 `cleanup` 结果，不会中断主脚本。持久注入还要注意 TTL：默认 2 小时（`--ttl` 可调），永久驻留必须显式 `--persist-forever --i-know-this-is-long-lived`。
+
+### 13.3 长脚本用 `--file`，不要塞命令行
+
+Windows 命令行有约 32K 字符上限，长脚本还会让 shell 转义变成主要故障源。
+
+```bash
+atb exec --file setup.js --file assertions.js --tab @latest
+cat script.js | atb exec --file - --tab @latest   # stdin
+```
+
+多个 `--file` 按出现顺序拼接；单个文件上限 `ATB_SCRIPT_FILE_MAX_MB`（默认 32 MiB）。本地配平检查误报时用 `--no-preflight` 或 `ATB_JS_CHECK=warn`，但不要把语法错误留给浏览器。
+
+### 13.4 大浏览器先过滤 `tabs`
+
+100+ 标签时 `tabs --ids` 本身就会吃掉大量 token，而且列表顺序不代表「最近使用」。
+
+```bash
+atb tabs --format jsonl --url-contains order --limit 20
+atb tabs --format tsv --title-contains 订单
+atb tabs --fields tab_id,title,url --mine
+```
+
+过滤在 daemon 侧执行；`tabs_total` 是过滤前总数，`filtered` 是过滤后数量。选中目标后优先 `atb use <tab_id>` 或 `--tab @latest`，不要靠 `@1` 猜「最近那个」。
+
+### 13.5 截图先等页面稳定
+
+`captureVisibleTab` / CDP 都不会替你等异步渲染。固定 `sleep` 要么不够、要么浪费；用截图自带的等待参数：
+
+```bash
+# 等选择器出现，再等 300ms 稳定
+atb screenshot --wait-selector '#chart canvas' --settle-ms 300 --out chart.png
+
+# 等网络空闲（只统计等待开始后的 fetch/XHR，不含 WebSocket/EventSource/静态资源）
+atb screenshot --network-idle --out page.png
+
+# 要求必须走 CDP；被拒时直接失败，不静默降级
+atb screenshot --full-page --require-cdp --out full.png
+```
+
+回包里看 `via` / `tab_visible` / `captured_tab` / `clip_box` / `degraded`：`via:"captureVisibleTab"` 表示走了降级通道，`captured_tab` 告诉你实际截到谁。整页截图的 fixed/sticky 元素仍可能在底部重复一次，这是 `captureBeyondViewport` 的浏览器限制；需要严格无重复时先隐藏固定元素或改用逐屏拼图并接受每屏重复。

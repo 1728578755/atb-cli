@@ -1,13 +1,13 @@
-//! 最小密码学实现： / HMAC-SHA256 / 小写 hex。
+//! 最小密码学实现：SHA-256 / HMAC-SHA256 / 小写 hex。
 //!
 //! 为什么手写而不是引依赖：本项目要求离线可构建、不新增第三方 crate。这里的
 //! 用途只有一个——daemon 在 WS 握手后向扩展证明「我持有 ws-trust.json 里的 token」，
 //! 输入是固定的短消息（`nonce|extension_id`），不需要流式、不需要高性能。
 //!
-//! 正确性靠标准测试向量兜底（见文件末尾）： 用 `"abc"`，HMAC 用
+//! 正确性靠标准测试向量兜底（见文件末尾）：SHA-256 用 `"abc"`，HMAC 用
 //! RFC 4231 Test Case 2。两处都覆盖到分组补齐、密钥填充与 ipad/opad 叠加。
 
-/// 轮常量（FIPS 180-4 §4.2.2）。
+/// SHA-256 轮常量（FIPS 180-4 §4.2.2）。
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -24,7 +24,7 @@ const H0: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
-/// HMAC / 的输入分组长度（字节）。
+/// HMAC / SHA-256 的输入分组长度（字节）。
 const BLOCK: usize = 64;
 
 /// 单块压缩函数（FIPS 180-4 §6.2.2）。
@@ -72,7 +72,7 @@ fn compress(state: &mut [u32; 8], chunk: &[u8]) {
     }
 }
 
-/// 摘要。
+/// SHA-256 摘要。
 pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     let mut state = H0;
     // 消息长度按 **比特** 记，附加在最后 8 字节（大端）。64 位长度对内存里
@@ -136,7 +136,7 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// 标准向量（FIPS 180-4 附录 B.1）：补齐逻辑与末尾长度字段的最小覆盖。
+    /// SHA-256 标准向量（FIPS 180-4 附录 B.1）：补齐逻辑与末尾长度字段的最小覆盖。
     #[test]
     fn sha256_matches_the_standard_vector_for_abc() {
         assert_eq!(

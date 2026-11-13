@@ -34,7 +34,8 @@ cargo build
 | 路径 | 内容 |
 | --- | --- |
 | `src/cli/` | 参数解析、输出、退出码、HTTP 客户端、各子命令 |
-| `src/server/` | daemon：标签页、读取、动作、网络、挑战、生命周期 |
+| `src/server/` | daemon：标签页、读取、动作、网络、挑战、生命周期、目标富化（`target_info.rs`） |
+| `src/server/focus.rs` / `env.rs` | `focus` / `use` 与 `extensions` 的 daemon 侧实现 |
 | `assets/page_*.js` | 注入页面的脚本，daemon 通过 `include_str!` 打包 |
 | `assets/atb_bridge/` | MV3 扩展；`ops/` 是页面脚本的生成副本 |
 | `npm/` | npm 包装，`bin/atb.js` 负责定位平台二进制 |
@@ -43,7 +44,7 @@ cargo build
 | `tests/` | Node 测试、契约测试、假扩展 E2E |
 | `docs/` | 深入文档与历史记录 |
 
-`src/protocol.rs` 定义两个协议版本常量（CLI↔daemon 为 5、扩展为 4）与共享 DTO；请求/响应的具体形状在 `src/server/dto.rs` 与各领域模块里。改协议之前先看「不能破坏的契约」。
+`src/protocol.rs` 定义两个协议版本常量（CLI↔daemon 为 5、扩展为 4）与共享 DTO；请求/响应的具体形状在 `src/server/dto.rs` 与各领域模块里。当前顶层命令 61 个；改协议之前先看「不能破坏的契约」。
 
 ## 开发循环
 
@@ -96,11 +97,16 @@ E2E 占用 `18766` 与 `18767` 端口，必须串行执行。并行会互相抢�
 
 | 契约 | 内容 |
 | --- | --- |
-| 退出码 | `0` 成功、`1` 执行失败、`2` 命令写错、`3` `job wait` / `download-wait` 超时、`4` 结果未知、`130` 取消 |
+| 退出码 | `0` 成功、`1` 执行失败、`2` 命令写错、`3` `job wait` / `job result` / `download-wait` 超时、`4` 结果未知、`130` 取消 |
 | `error_code` | 已有取值不改名、不改语义；新增时配 `hint` |
 | JSON 字段 | 只增不改。删字段、改类型、改含义都算破坏 |
 | CLI ↔ daemon 协议 | 当前 `5`。不兼容变更要两端同时改并升版本 |
 | 扩展消息协议 | 当前 `4`。同上 |
+| 新增命令（0.8.0） | `focus` / `use` / `env` / `extensions` / `measure` / `userscript` 共 6 个顶层命令；`job tail` / `job result` 是子命令。新增命令必须同时进 `args.rs`、`cmd_schema.rs`、`README` 命令表与 `skills/atb/references/commands.md` |
+| `resolved_target` | 单目标页面命令顶层字段只增不改（`tab_id` / `session_key` / `url` / `title` / `browser_id` / `profile_id` / `browser` / `profile` / `active` / `visible`）；`/open` `/multi` `/run` `/batch` `/scrape` `/broadcast` 按设计不富化 |
+| 本轮新增 / 明确的 `error_code` | `target_ambiguous`（exit 2）、`permission_required` / `extension_outdated` / `focus_failed` / `inject_script_threw` / `exec_result_not_found` / `special_scheme_open_failed` / `daemon_outdated`（exit 1）、`unsupported_selector`（exit 2）；全部带 `hint` |
+| optional 权限 | `management` 只能放 `optional_permissions`，由用户在扩展设置页授权；未授权时 `atb extensions` 返回 `permission_required`，不得静默降级 |
+| inject TTL | 新 daemon 的 `--persist` 默认 7200s；旧 daemon 不传 TTL 字段时扩展保持旧行为「永久」；永久必须显式 `--persist-forever --i-know-this-is-long-lived` |
 
 `status` 的 `ok` 跟随 `healthy`；`ATB_EXIT0=1` 保留旧的「恒 0」行为。动这块前先确认不影响现有脚本。
 
@@ -141,7 +147,7 @@ docs(skill): rewrite failure handling table
 - [ ] 改过页面脚本时，`npm run sync:extension` 已执行且 `npm run check:extension` 通过
 - [ ] 文档里的版本锚点逐字未变，或已随版本一起更新
 - [ ] 中英 README 同步：改一边就改另一边
-- [ ] 行为、命令、契约、扩展或构建流程有变化时，README / AI_INSTALL / docs 与 skills 已同步更新
+- [ ] 行为、命令、契约、扩展或构建流程有变化时，相关文档与测试已同步更新
 
 PR 描述写清三件事：改了哪一层、为什么改、怎么验证。输出或行为有变化时贴前后对比。
 
@@ -149,7 +155,7 @@ PR 描述写清三件事：改了哪一层、为什么改、怎么验证。输�
 
 - 版本唯一真相源是 `package.json`。
 - 改版本后跑 `npm run sync-version`，它按 [`scripts/version-docs.json`](./scripts/version-docs.json) 的落点清单改写 `Cargo.toml`、`README.md`、`README_EN.md` 等当前真相文档，并 `git add`；新增“当前版本”文档时必须把落点加进清单，否则守卫会空转。
-- 平台包清单必须四处一致：`package.json` 的 `optionalDependencies`、`scripts/platforms.json`、`.github/workflows/publish.yml` 的 matrix、`npm/bin/atb.js` 的平台解析。
+- 平台包清单必须四处一致：`package.json` 的 `optionalDependencies`、`scripts/platforms.json`、`.github/workflows/publish.yml` 的 matrix（由 `scripts/platforms.mjs` 生成）、`npm/bin/atb.js` 的平台解析。
 - 扩展版本独立维护：改 `assets/atb_bridge/manifest.json`，同步文档里的版本断言。
 - 发布由 push tag `v*` 触发，也可手动 dispatch。workflow 构建 5 个平台包后发布 npm。
 

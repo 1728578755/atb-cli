@@ -95,13 +95,19 @@ atb --async screenshot --full-page --out /tmp/full.png
 ### 3.2 取结果
 
 ```bash
-atb job list                     # 最近任务
+atb job list                     # 最近任务（含 elapsed_ms / last_heartbeat / stalled）
 atb job get <job_id>             # 查一次
 atb job wait <job_id> --timeout 300
 atb job cancel <job_id>
+atb job tail <job_id>            # 轮询跟随，状态/进度变化时输出 JSONL 快照
+atb job result <exec_id> --wait 60   # 取回超时 exec 的迟到结果
 ```
 
 `job wait` 会阻塞到任务结束；超时不会丢弃任务，返回 `error_code: "job_wait_timeout"` 并附带当前状态，可以稍后再查。
+
+`job tail` 不是服务端推送：CLI 每 `--interval`（默认 0.5s）轮询 `/job/get/:id`，只在状态、进度或 `stalled` 变化时输出一行；任务结束后输出最终结果并按 succeeded/failed/cancelled 映射 0/1/130。`--timeout 0` 表示跟到结束（上限 24h）。
+
+`job result` 轮询 `GET /exec-result/:id`。这个结果来自「扩展在 CLI 超时后才回包」的 exec，daemon 暂存 **60 分钟**（`ATB_EXEC_RESULT_TTL_SEC`，60..86400，默认 3600）、最多 512 条；`exec_timeout` 的 hint 会直接给出 `atb job result <exec_id> --wait 60`。等待超时 exit 3，`--wait 0` 的立即未命中 exit 1（`exec_result_not_found`）。
 
 任务完成后的结构：
 
@@ -113,6 +119,9 @@ atb job cancel <job_id>
     "op": "exec",
     "status": "succeeded",          // running | succeeded | failed | cancelled
     "elapsed_ms": 208,
+    "last_heartbeat": 1793512483800, // epoch ms
+    "heartbeat_age_ms": 1200,
+    "stalled": false,
     "result": { "status": "success", "js_return": "Example Domain", "tab_id": "…" },
     "error": null,
     "session_key": "browser-…:profile-…:123456"
@@ -123,10 +132,11 @@ atb job cancel <job_id>
 说明：
 
 - 任务结果与同步接口完全一致，直接复用同一套执行函数，不存在"两套逻辑"。
+- `stalled` 只表示「running 且距上次心跳超过 `ATB_JOB_STALL_SEC`（默认 60s）」，不是「页面无响应」的判定；终态永不 stalled。`last_heartbeat` 与 `heartbeat_age_ms` 都是 epoch 毫秒口径（时钟回拨时年龄夹到 0）。
 - 取消是**协作式**的：等待类任务立刻停止；已经发出的页面脚本会执行完当前步骤。
 - daemon 在**有任务运行时不会因空闲退出**（空闲计时会让路），任务结束才恢复计时；即使计时到点，只要还有扩展连着也不会退。
-- 任务历史最多保留 100 条，超出后清理已完成的最旧记录。
-- 结果只在 daemon 内存里；daemon 重启后 `job get` 会返回 `job_not_found`。需要长期留存的产物请落到文件（`screenshot --out` / `save-pdf --out`）。
+- 任务元数据软上限 100 条（超出按「最旧已结束」批量淘汰 20 条）、硬上限 500 条；硬淘汰 Running 任务前先 `abort()`，淘汰存根只保留最近 32 条。
+- 结果只在 daemon 内存里；daemon 重启后 `job get` 会返回 `job_not_found`。需要长期留存的产物请落到文件（`screenshot --out` / `save-pdf --out`）。超时 exec 的迟到结果另有 60 分钟 TTL，见 `job result`。
 
 ### 3.3 `health` 新增字段
 
@@ -161,7 +171,7 @@ atb run steps.json
 
 ### 3.5 失败可编程与输出体积
 
-- 退出码：`0` 成功 / `1` 执行失败（含普通 `wait` 与 `challenge` 超时）/ `2` 命令写错（含 `--async` 不支持）/ `3` 仅 `job wait` 与 `download-wait` 超时 / `4` 结果未知（动作可能已执行，带同一 `--idempotency-key` 重发）/ `130` 任务被取消。
+- 退出码：`0` 成功 / `1` 执行失败（含普通 `wait` 与 `challenge` 超时）/ `2` 命令写错（含 `--async` 不支持）/ `3` 仅 `job wait`、`job result` 与 `download-wait` 超时 / `4` 结果未知（动作可能已执行，带同一 `--idempotency-key` 重发）/ `130` 任务被取消。
 - `ATB_EXIT0=1` 可恢复旧的「失败也返回 0」行为，仅在有脚本依赖旧行为时使用；`0` / `false` / 空串不再开启（旧实现只要设置就生效）。
 - 默认输出 **compact JSON**（单行）；需要人读时加 `--pretty`。
 - `tabs` 默认把 URL 截断到 80 字符，`tabs --full` 输出完整 URL；内部数据模型始终保留完整 URL。
@@ -174,6 +184,8 @@ atb run steps.json
 | `ATB_HOME` | `~/.atb` | 配置目录；只影响配置与 token，不影响 `~` 展开 |
 | `ATB_IDLE_TTL` | 300 | 无扩展连接时的空闲退出秒数（有任务运行或扩展连着时不退） |
 | `ATB_MAX_RUNNING_JOBS` | 32 | 同时运行的 job 上限，硬淘汰前先 abort |
+| `ATB_JOB_STALL_SEC` | 60 | `job list/tail` 判定 running 任务「卡住」的心跳超时（5..3600 秒） |
+| `ATB_EXEC_RESULT_TTL_SEC` | 3600 | 超时 exec 迟到结果的保留时长（60..86400 秒） |
 | `ATB_EXIT0` | 关 | 恢复旧的恒 0 退出码，值须为 `1` / `true` |
 | `ATB_HTTP_SLACK_SEC` | 10 | CLI 计算 HTTP 超时时在业务超时上追加的余量 |
 | `ATB_WAIT_MAX_TOTAL_SEC` | 600 | `wait` / `--wait-js` 单条命令的总预算上限 |
@@ -226,7 +238,7 @@ daemon: 默认每 50ms 注入一次 wait_js（`ATB_WAIT_MIN_INTERVAL_MS`，值�
 | 限制 | 影响 | 缓解 |
 |---|---|---|
 | `chrome.debugger` attach 会显示"正在调试此浏览器"提示条 | 只要用到 CDP（snapshot / 截图 / 网络 / 控制台 / mouse-click）就会出现 | 普通 DOM 操作（exec / click / fill / send-keys）走 `scripting`，不 attach；整页/元素截图与 `save-pdf` 在被拒时回落到不 attach 的通道（`captureVisibleTab` / 拼图 / 图片型 PDF），结果里用 `via` 区分 |
-| 后台标签页不渲染 | `IntersectionObserver` 懒加载、图片延迟加载、`requestAnimationFrame` 可能不触发 | 需要完整内容时先 `--focus` 打开，或显式滚动（`scrollIntoView`）；后续可加 `Emulation.setFocusEmulationEnabled` 选项 |
+| 后台标签页不渲染 | `IntersectionObserver` 懒加载、图片延迟加载、`requestAnimationFrame` 可能不触发 | 需要完整内容时先 `atb focus --tab <id>`（或 `open --focus`），或显式滚动（`scrollIntoView`）；单目标命令回包会带 `tab_hidden` / `timers_throttled` 警告与 focus 提示 |
 | 后台标签页可能被冻结 | 长任务中途脚本执行被暂停 | 已用 `autoDiscardable:false` 防止丢弃；CDP 路径额外调用 `Page.setWebLifecycleState('active')` |
 | 同一标签页只能被一个 debugger 占用 | 用户打开 DevTools 时 `snapshot` 走 JS 版；**可见区域**截图仍可（`captureVisibleTab`）；整页/元素截图、`network`、`console` 会失败 | 错误返回 `Another debugger is already attached`；此时改用 `exec` / `read` / `find`，或让用户关掉 DevTools |
 | 页面原生弹窗 | `alert/confirm` 会阻塞页面脚本 | 扩展在 CLI 执行期间临时抑制并 toast 提示，执行完恢复 |
@@ -292,3 +304,4 @@ atb close --tab <opened_tab_id>
 
 1. `job` 结果落盘（`--out`），避免 daemon 重启丢结果。
 2. 后台模式的焦点模拟（`Emulation.setFocusEmulationEnabled`）与懒加载触发策略。
+3. 服务端进度回调：`job tail` 当前是 CLI 轮询；`progress` 字段只有任务自己提供时才出现，没有通用进度通道。

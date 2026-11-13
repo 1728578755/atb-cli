@@ -33,14 +33,47 @@ pub(crate) struct JobRecord {
     pub(crate) started_at: Option<f64>,
     pub(crate) finished_at: Option<f64>,
     pub(crate) elapsed_ms: u64,
+    // 最近一次「任务状态发生变化」的 epoch 毫秒。
+    ///
+    /// 单条后台 op 没有细粒度进度通道，所以心跳只在开始 / 取消 / 结束时更新；
+    /// `stalled` 只表示「距上次状态变化超过阈值」，不是「页面无响应」的判定。
+    pub(crate) last_heartbeat_ms: u64,
     pub(crate) result: Option<Value>,
     pub(crate) error: Option<Value>,
     pub(crate) session_key: Option<String>,
     pub(crate) cancel: Arc<AtomicBool>,
 }
 
+/// 当前 epoch 毫秒，统一用 u64（`last_heartbeat` / `ts` 同一单位）。
+pub(crate) fn epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// `ATB_JOB_STALL_SEC`：心跳超过该秒数未更新时把 running 任务标记为 stalled。
+///
+/// `ATB_*` 统一经 `settings.rs` 访问器读取；默认 60 秒。
+pub(crate) fn job_stall_sec() -> u64 {
+    crate::settings::job_stall_sec()
+}
+
+/// 纯函数：running + 心跳年龄超过阈值才算 stalled（终态永不 stalled）。
+pub(crate) fn job_is_stalled(
+    status: JobStatus,
+    last_heartbeat_ms: u64,
+    now_ms: u64,
+    stall_sec: u64,
+) -> bool {
+    status.is_running()
+        && now_ms.saturating_sub(last_heartbeat_ms) > stall_sec.saturating_mul(1_000)
+}
+
 impl JobRecord {
     pub(crate) fn to_json(&self) -> Value {
+        let now_ms = epoch_millis();
+        let heartbeat_age_ms = now_ms.saturating_sub(self.last_heartbeat_ms);
         json!({
             "id": self.id,
             "op": self.op,
@@ -49,6 +82,16 @@ impl JobRecord {
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "elapsed_ms": self.elapsed_ms,
+            // 只增字段。last_heartbeat 用 epoch 毫秒，heartbeat_age_ms
+            // 由 daemon 计算，调用方不必自己拿本地时钟做差（可能有时区/时钟漂移）。
+            "last_heartbeat": self.last_heartbeat_ms,
+            "heartbeat_age_ms": heartbeat_age_ms,
+            "stalled": job_is_stalled(
+                self.status,
+                self.last_heartbeat_ms,
+                now_ms,
+                job_stall_sec()
+            ),
             "result": self.result,
             "error": self.error,
             "session_key": self.session_key,
@@ -139,7 +182,7 @@ impl JobStore {
     /// 排序键固定为 `finished_at.unwrap_or(created_at)` 升序（同值按 id 字典序），
     /// 保证「先完成、最旧」的先走，而不是取决于 HashMap 的迭代顺序。
     /// 已结束的都删完了还到硬上限时，只能强制淘汰最旧的 Running——**先 abort 再删**
-    /// （；旧实现只删记录，任务继续占着标签与并发额度）。被淘汰的 id 会留
+    // 。被淘汰的 id 会留
     /// `job_evicted` 存根（见 `record_eviction`），这是表有界的代价，必须显式打日志。
     pub(crate) fn evict_for_insert(&mut self) {
         if self.jobs.len() < JOB_STORE_SOFT_LIMIT {
@@ -453,6 +496,7 @@ pub(crate) async fn job_submit(
         started_at: None,
         finished_at: None,
         elapsed_ms: 0,
+        last_heartbeat_ms: epoch_millis(),
         result: None,
         error: None,
         session_key: None,
@@ -498,6 +542,7 @@ pub(crate) async fn job_submit(
             let mut store = task_state.jobs.lock().await;
             if let Some(job) = store.jobs.get_mut(&task_id) {
                 job.started_at = Some(epoch_secs());
+                job.last_heartbeat_ms = epoch_millis();
             }
         }
         let outcome = run_job(&task_state, &task_op, req.args, cancel.clone()).await;
@@ -523,6 +568,7 @@ pub(crate) async fn job_submit(
             Some(job) => {
                 job.finished_at = Some(epoch_secs());
                 job.elapsed_ms = elapsed_ms;
+                job.last_heartbeat_ms = epoch_millis();
                 // 只有「仍在 Running」才允许 cancel 改写终态：cancel 落在任务刚完成的
                 // 窗口里时结果已经产生，判成 Cancelled 会把结果整个丢掉。
                 if job.status.is_running() && cancelled {
@@ -663,6 +709,9 @@ pub(crate) async fn job_cancel(
     let running = job.status.is_running();
     if running {
         job.cancel.store(true, Ordering::Relaxed);
+        // 取消请求本身也是一次状态变化：刷新心跳，避免 `job tail` 把
+        // 「刚请求取消、任务正在收尾」误报成 stalled。
+        job.last_heartbeat_ms = epoch_millis();
     }
     Json(json!({
         "ok": true,
@@ -744,5 +793,66 @@ pub(crate) async fn run_job(
         "screenshot" => screenshot_page(state, serde_json::from_value(args)?).await,
         "save-pdf" => save_pdf_page(state, serde_json::from_value(args)?).await,
         other => Err(anyhow!("unsupported async op: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    // 只有 running 且心跳年龄 **超过** 阈值才算 stalled。
+    #[test]
+    fn stalled_only_for_running_jobs_over_threshold() {
+        // 60s 阈值，心跳 61s 前 = stalled。
+        assert!(job_is_stalled(JobStatus::Running, 1_000, 62_000, 60));
+        // 恰好 60s 不算「超过」。
+        assert!(!job_is_stalled(JobStatus::Running, 1_000, 61_000, 60));
+        // 终态永不 stalled，即使心跳很旧。
+        assert!(!job_is_stalled(JobStatus::Succeeded, 0, 10_000_000, 60));
+        assert!(!job_is_stalled(JobStatus::Failed, 0, 10_000_000, 60));
+        assert!(!job_is_stalled(JobStatus::Cancelled, 0, 10_000_000, 60));
+    }
+
+    /// 心跳时间在「未来」（时钟回拨）时年龄夹到 0，不能把任务误判成 stalled。
+    #[test]
+    fn heartbeat_in_the_future_is_not_stalled() {
+        assert!(!job_is_stalled(JobStatus::Running, 5_000, 1_000, 60));
+    }
+
+    fn job_with_heartbeat(status: JobStatus, last_heartbeat_ms: u64) -> JobRecord {
+        JobRecord {
+            id: "job-1".to_string(),
+            op: "exec".to_string(),
+            status,
+            created_at: 0.0,
+            started_at: Some(0.0),
+            finished_at: None,
+            elapsed_ms: 0,
+            last_heartbeat_ms,
+            result: None,
+            error: None,
+            session_key: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 只增字段：`job get/list` 的 JSON 必须同时给出 last_heartbeat /
+    /// heartbeat_age_ms / stalled，且旧字段保持原样。
+    #[test]
+    fn job_json_exposes_heartbeat_fields() {
+        let fresh = job_with_heartbeat(JobStatus::Running, epoch_millis()).to_json();
+        assert!(fresh["last_heartbeat"].as_u64().unwrap() > 0);
+        assert_eq!(fresh["stalled"], json!(false));
+        assert!(fresh["heartbeat_age_ms"].as_u64().is_some());
+        // 旧字段仍在。
+        assert_eq!(fresh["id"], json!("job-1"));
+        assert_eq!(fresh["status"], json!("running"));
+
+        // 心跳停在 epoch 1ms：running 必须被判 stalled。
+        let stale = job_with_heartbeat(JobStatus::Running, 1).to_json();
+        assert_eq!(stale["stalled"], json!(true));
+        // 终态同样保留心跳字段，但不会 stalled。
+        let done = job_with_heartbeat(JobStatus::Succeeded, 1).to_json();
+        assert_eq!(done["stalled"], json!(false));
     }
 }

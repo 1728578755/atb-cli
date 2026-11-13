@@ -91,7 +91,7 @@ pub(crate) fn fold_tree_inner(nodes: Vec<Value>, budget: &mut usize, depth: usiz
 ///
 /// 预览取的是**值本身**的内容，而不是序列化后的文本：旧实现直接截序列化文本的前 N 个
 /// 字符，开头那个 `"` 与内部的 `\"` 转义都算进预算，`max_chars=1` 时 preview 就是 `"`，
-/// 等于什么都没有。
+// 等于什么都没有。
 pub(crate) fn truncate_json_value_chars(result: &mut Value, max_chars: usize) -> bool {
     match result.get_mut("js_return") {
         Some(slot) => truncate_json_slot_chars(slot, max_chars),
@@ -99,7 +99,7 @@ pub(crate) fn truncate_json_value_chars(result: &mut Value, max_chars: usize) ->
     }
 }
 
-/// 有上限的「字符计数器 + 前缀收集器」。
+// 有上限的「字符计数器 + 前缀收集器」。
 ///
 /// 序列化直接写进这个 sink：边写边数字符、只在预算内保留前缀，峰值内存是
 /// **预览大小**而不是回包大小。旧实现先 `to_string()` 一份完整文本再判长，
@@ -122,7 +122,7 @@ impl CharBudgetWriter {
 
 impl std::io::Write for CharBudgetWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // serde_json 的所有写入都是完整 片段（转义按字符边界切分），
+        // serde_json 的所有写入都是完整 UTF-8 片段（转义按字符边界切分），
         // 直接按 chars 迭代即可；真遇到非法片段就按字节退化成保守计数。
         match std::str::from_utf8(buf) {
             Ok(text) => {
@@ -182,7 +182,7 @@ pub(crate) fn truncate_json_slot_chars(slot: &mut Value, max_chars: usize) -> bo
 ///
 /// snapshot 的 `returned` 必须和「实际交给调用方的 @e 数量」同口径：
 /// CDP 路径以前统计的是快照缓存里的 refs（截断前），JS 路径统计的是树节点数，
-/// 两条路在同一份数据上会给出不同的数。
+// 两条路在同一份数据上会给出不同的数。
 pub(crate) fn count_tree_refs(nodes: &[Value]) -> usize {
     count_tree_refs_at(nodes, 0)
 }
@@ -220,7 +220,7 @@ pub(crate) fn page_payload(mut result: Value, key: &str) -> Value {
 mod regression_tests {
     use super::*;
 
-    /// preview 截的是「值本身」，不能再把外层引号与转义算进预算。
+    /// P3：preview 截的是「值本身」，不能再把外层引号与转义算进预算。
     #[test]
     fn truncation_preview_keeps_real_text() {
         let mut value = json!({ "js_return": "hello" });
@@ -244,7 +244,7 @@ mod regression_tests {
 mod budget_tests {
     use super::*;
 
-    /// 非字符串值也按字符预算截断，且 `preview` 是紧凑 JSON 文本的前 N 个字符。
+    // 非字符串值也按字符预算截断，且 `preview` 是紧凑 JSON 文本的前 N 个字符。
     #[test]
     fn truncates_object_without_full_serialization() {
         let mut value = json!({ "js_return": { "items": [1, 2, 3], "note": "abcdef" } });

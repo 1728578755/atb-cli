@@ -1,4 +1,4 @@
-// ---- 入口挂载（收口）----
+// ---- 入口挂载----
 // 本文件以前是 4 个顶层函数声明（findMainList / findTopGroups / findMatchingElements /
 // scoreContainer）：classic script 里那是**可枚举 + 可删除**的全局，站点一行
 // `Object.keys(window)` 就能看见，正是 page_net.js 头部批判过的指纹形态；而 stealth
@@ -311,7 +311,7 @@ function findMainList(startElement = null, opts) {
         return totalScore;
     }
 
-/// 临时全局入口：与 simphtml_opt.js 的 publishTempGlobal 同一套语义。
+// 临时全局入口：与 simphtml_opt.js 的 publishTempGlobal 同一套语义。
 ///
 /// 调用方（daemon 的 `scan --list`，见 `html::js_find_main_list`）把本文件与
 /// `return findMainList(...)` 拼在同一段脚本里，所以入口必须能被裸标识符解析到。

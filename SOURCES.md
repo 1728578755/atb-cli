@@ -39,7 +39,7 @@
 | axum | 本地 HTTP API 与 WebSocket 服务 | MIT |
 | clap | 命令行解析（derive） | MIT OR Apache-2.0 |
 | dirs | 跨平台配置目录 | MIT OR Apache-2.0 |
-| dunce | Windows 路径规范化 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
+| dunce | Windows 路径规范化 | C .0 OR MIT-0 OR Apache-2.0 |
 | fs2 | 文件锁，保护配置原子写 | MIT OR Apache-2.0 |
 | html5ever | HTML 解析 | MIT OR Apache-2.0 |
 | libc | Unix 系统调用与信号 | MIT OR Apache-2.0 |
@@ -95,7 +95,7 @@ npm 发布开启 provenance（`publishConfig.provenance = true`），主包通�
 
 ## 许可证边界
 
-- 本项目以 MIT 许可发布，Copyright (c) 2026 sleepinginsummer，全文见 [LICENSE](./LICENSE)。
+- 本项目以 MIT 许可发布，Copyright (c) 2026 1728578755 / sleepinginsummer / lsdefine，全文见 [LICENSE](./LICENSE)。
 - 上游项目与第三方 crate 各自保留其许可，不因本项目采用 MIT 而改变。
 - 再分发二进制或源码时，保留 `LICENSE`、上游版权声明与依赖许可文本；如需对外分发，建议同时生成第三方许可清单。
 - 修改派生自上游的文件时，不要移除已有的版权或来源注释；如果上游许可要求署名，在该文件顶部补上。
@@ -104,7 +104,7 @@ npm 发布开启 provenance（`publishConfig.provenance = true`），主包通�
 
 新增或升级依赖、扩大上游派生范围、替换素材、变更许可证时，同步更新本文件。
 
-CI 不校验本文件内容，由评审人工确认。
+CI 不校验本文件内容，由维护者人工确认。
 
 ## 相关文档
 
