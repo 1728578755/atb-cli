@@ -281,7 +281,10 @@ jobs:
         with:
           # 附注 tag 的说明就是 Release notes 的来源；浅克隆只有 commit，
           # `git tag --format='%(contents)'` 会退化成 commit 标题。
+          # fetch-depth: 0 只保证历史完整；tag 对象仍需显式抓取，否则
+          # `%(contents)` 仍可能退化成 commit 标题（0.8.0 实测）。
           fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-node@v4
         with:
